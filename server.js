@@ -198,6 +198,26 @@ app.post('/servers/:id/leave', authMiddleware, async (req, res) => {
   res.json({ message: 'Left server.' });
 });
 
+// --- PROFILE UPLOADS: avatar/banner images or GIFs, any logged-in user ---
+app.post('/profile/upload', authMiddleware, (req, res) => {
+  upload.single('file')(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message || 'Upload failed.' });
+    if (!req.file) return res.status(400).json({ error: 'No file provided.' });
+    res.json({ url: `/uploads/${req.file.filename}`, mimeType: req.file.mimetype });
+  });
+});
+
+// --- SERVERS: delete (owner only — wipes its channels + memberships too) ---
+app.delete('/servers/:id', authMiddleware, requireRole(['owner']), async (req, res) => {
+  const serverId = req.params.id;
+  await prisma.$transaction([
+    prisma.serverMember.deleteMany({ where: { serverId } }),
+    prisma.channel.deleteMany({ where: { serverId } }),
+    prisma.server.delete({ where: { id: serverId } }),
+  ]);
+  res.json({ message: 'Server deleted.' });
+});
+
 // --- CHANNELS: list / create (create = owner/admin only) ---
 app.get('/servers/:id/channels', authMiddleware, requireMembership(), async (req, res) => {
   const channels = await prisma.channel.findMany({ where: { serverId: req.params.id } });
@@ -209,6 +229,19 @@ app.post('/servers/:id/channels', authMiddleware, requireRole(['owner', 'admin']
   if (!name) return res.status(400).json({ error: 'Channel name required.' });
   const channel = await prisma.channel.create({ data: { name, serverId: req.params.id } });
   res.json(channel);
+});
+
+// --- CHANNELS: delete (owner/admin only, must belong to this server) ---
+app.delete('/servers/:id/channels/:channelId', authMiddleware, requireRole(['owner', 'admin']), async (req, res) => {
+  const { id: serverId, channelId } = req.params;
+  const channel = await prisma.channel.findUnique({ where: { id: channelId } });
+  if (!channel || channel.serverId !== serverId) return res.status(404).json({ error: 'Room not found.' });
+
+  const remaining = await prisma.channel.count({ where: { serverId } });
+  if (remaining <= 1) return res.status(400).json({ error: 'A server needs at least one room.' });
+
+  await prisma.channel.delete({ where: { id: channelId } });
+  res.json({ message: 'Room deleted.' });
 });
 
 // --- MEMBERS: list / change role (owner/admin only, can't touch the owner) ---
