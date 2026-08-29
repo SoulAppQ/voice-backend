@@ -122,48 +122,64 @@ app.post('/register', async (req, res) => {
 
 // --- SECURE LOGIN ---
 app.post('/login', async (req, res) => {
-  const { username, password } = req.body;
-  const user = await prisma.user.findUnique({ where: { username } });
+  try {
+    const { username, password } = req.body;
+    const user = await prisma.user.findUnique({ where: { username } });
 
-  if (!user || !(await bcrypt.compare(password, user.password))) {
-    return res.status(401).json({ error: 'Invalid credentials.' });
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.status(401).json({ error: 'Invalid credentials.' });
+    }
+
+    const authToken = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET);
+    res.json({
+      authToken,
+      username: user.username,
+      userId: user.id,
+      avatarUrl: user.avatarUrl,
+      bannerUrl: user.bannerUrl,
+      bannerColor: user.bannerColor,
+    });
+  } catch (err) {
+    console.error('Login failed:', err);
+    res.status(500).json({ error: 'Login failed. Please try again.' });
   }
-
-  const authToken = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET);
-  res.json({
-    authToken,
-    username: user.username,
-    userId: user.id,
-    avatarUrl: user.avatarUrl,
-    bannerUrl: user.bannerUrl,
-    bannerColor: user.bannerColor,
-  });
 });
 
 app.get('/me', authMiddleware, async (req, res) => {
-  const user = await prisma.user.findUnique({ where: { id: req.user.id } });
-  if (!user) return res.status(404).json({ error: 'User not found.' });
-  res.json({
-    id: user.id,
-    username: user.username,
-    avatarUrl: user.avatarUrl,
-    bannerUrl: user.bannerUrl,
-    bannerColor: user.bannerColor,
-  });
+  try {
+    const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+    if (!user) return res.status(404).json({ error: 'User not found.' });
+    res.json({
+      id: user.id,
+      username: user.username,
+      avatarUrl: user.avatarUrl,
+      bannerUrl: user.bannerUrl,
+      bannerColor: user.bannerColor,
+    });
+  } catch (err) {
+    console.error('GET /me failed:', err);
+    res.status(500).json({ error: 'Could not load your profile.' });
+  }
 });
 
 // --- PROFILE: update avatar/banner (persisted on the account, not the device) ---
 app.patch('/me/profile', authMiddleware, async (req, res) => {
-  const { avatarUrl, bannerUrl, bannerColor } = req.body;
-  const updated = await prisma.user.update({
-    where: { id: req.user.id },
-    data: {
-      ...(avatarUrl !== undefined ? { avatarUrl } : {}),
-      ...(bannerUrl !== undefined ? { bannerUrl } : {}),
-      ...(bannerColor !== undefined ? { bannerColor } : {}),
-    },
-  });
-  res.json({ avatarUrl: updated.avatarUrl, bannerUrl: updated.bannerUrl, bannerColor: updated.bannerColor });
+  try {
+    const { avatarUrl, bannerUrl, bannerColor } = req.body;
+    const updated = await prisma.user.update({
+      where: { id: req.user.id },
+      data: {
+        ...(avatarUrl !== undefined ? { avatarUrl } : {}),
+        ...(bannerUrl !== undefined ? { bannerUrl } : {}),
+        ...(bannerColor !== undefined ? { bannerColor } : {}),
+      },
+    });
+    res.json({ avatarUrl: updated.avatarUrl, bannerUrl: updated.bannerUrl, bannerColor: updated.bannerColor });
+  } catch (err) {
+    // Most common cause: the DB migration adding these columns hasn't been run yet.
+    console.error('PATCH /me/profile failed:', err);
+    res.status(500).json({ error: 'Could not save your profile. Has the database migration been run?' });
+  }
 });
 
 // --- SERVERS: list/search (public-ish, but shows membership if logged in) ---
