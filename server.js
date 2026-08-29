@@ -10,21 +10,15 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
 // --- LIVEKIT TOKEN GENERATOR ---
-// We added 'async' here
 app.get('/getToken', async (req, res) => {
-  // Replace these with your actual LiveKit keys!
-  const apiKey = 'APIbm8dK7dHvr3i';
-  const apiSecret = 'OWnW1c5taUEwiZzsaDfG1BcQeyn9WAZjWBMaCqz8ZMx';
-  
-  const roomName = 'general-voice-channel';
-  const participantName = 'User-' + Math.floor(Math.random() * 1000);
 
-  const at = new AccessToken(apiKey, apiSecret, { identity: participantName });
+  const participantName = req.query.username || 'Guest-' + Math.floor(Math.random() * 100);
+  const roomName = req.query.room || 'General';
+
+  const at = new AccessToken('APIbm8dK7dHvr3i', 'OWnW1c5taUEwiZzsaDfG1BcQeyn9WAZjWBMaCqz8ZMx', { identity: participantName });
   at.addGrant({ roomJoin: true, room: roomName, canPublish: true, canSubscribe: true });
 
-  // We added 'await' here to wait for the token to finish generating
   const token = await at.toJwt();
-  
   res.send({ token: token });
 });
 
