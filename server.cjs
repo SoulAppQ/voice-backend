@@ -16,6 +16,12 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Safety net: an uncaught error in any route (ours or a future one) should
+// log and keep the process alive, not take down every other endpoint.
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled promise rejection (server stayed up):', reason);
+});
+
 // ---- CLIP/SCREENSHOT UPLOADS ---------------------------------------------
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR);
@@ -366,11 +372,16 @@ app.post(
 
 // --- SOUNDBOARD: list clips for a server (any member) ---
 app.get('/servers/:id/soundboard', authMiddleware, requireMembership(), async (req, res) => {
-  const clips = await prisma.soundboardClip.findMany({
-    where: { serverId: req.params.id },
-    orderBy: { createdAt: 'asc' },
-  });
-  res.json(clips);
+  try {
+    const clips = await prisma.soundboardClip.findMany({
+      where: { serverId: req.params.id },
+      orderBy: { createdAt: 'asc' },
+    });
+    res.json(clips);
+  } catch (error) {
+    console.error('GET /soundboard failed:', error);
+    res.status(500).json({ error: 'Could not load soundboard clips. Has the database migration been run?' });
+  }
 });
 
 // --- SOUNDBOARD: upload a clip (any member, MP3 only, 2MB cap) ---
@@ -386,22 +397,27 @@ app.post('/servers/:id/soundboard', authMiddleware, requireMembership(), (req, r
       res.json(clip);
     } catch (error) {
       console.error('Soundboard upload failed:', error);
-      res.status(500).json({ error: 'Could not save the clip.' });
+      res.status(500).json({ error: 'Could not save the clip. Has the database migration been run?' });
     }
   });
 });
 
 // --- SOUNDBOARD: delete a clip (uploader, or owner/admin) ---
 app.delete('/servers/:id/soundboard/:clipId', authMiddleware, requireMembership(), async (req, res) => {
-  const clip = await prisma.soundboardClip.findUnique({ where: { id: req.params.clipId } });
-  if (!clip || clip.serverId !== req.params.id) return res.status(404).json({ error: 'Clip not found.' });
+  try {
+    const clip = await prisma.soundboardClip.findUnique({ where: { id: req.params.clipId } });
+    if (!clip || clip.serverId !== req.params.id) return res.status(404).json({ error: 'Clip not found.' });
 
-  const isUploader = clip.uploaderId === req.user.id;
-  const isManager = ['owner', 'admin'].includes(req.membership.role);
-  if (!isUploader && !isManager) return res.status(403).json({ error: 'Insufficient permissions.' });
+    const isUploader = clip.uploaderId === req.user.id;
+    const isManager = ['owner', 'admin'].includes(req.membership.role);
+    if (!isUploader && !isManager) return res.status(403).json({ error: 'Insufficient permissions.' });
 
-  await prisma.soundboardClip.delete({ where: { id: clip.id } });
-  res.json({ message: 'Clip deleted.' });
+    await prisma.soundboardClip.delete({ where: { id: clip.id } });
+    res.json({ message: 'Clip deleted.' });
+  } catch (error) {
+    console.error('DELETE /soundboard failed:', error);
+    res.status(500).json({ error: 'Could not delete the clip.' });
+  }
 });
 
 // --- LIVEKIT TOKEN GENERATOR ---
