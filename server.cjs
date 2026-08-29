@@ -455,6 +455,10 @@ io.on('connection', (socket) => {
     socket.broadcast.to(data.channelId).emit('receive_message', data);
   });
 
+  socket.on('typing', (data) => {
+    socket.broadcast.to(data.channelId).emit('typing', data);
+  });
+
   socket.on('play_soundboard', (data) => {
     // data: { channelId, clipId, name, url, sender }
     // Broadcast only — the sender plays their own trigger locally without waiting on a round trip.
