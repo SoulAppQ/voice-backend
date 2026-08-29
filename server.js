@@ -130,11 +130,40 @@ app.post('/login', async (req, res) => {
   }
 
   const authToken = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET);
-  res.json({ authToken, username: user.username, userId: user.id });
+  res.json({
+    authToken,
+    username: user.username,
+    userId: user.id,
+    avatarUrl: user.avatarUrl,
+    bannerUrl: user.bannerUrl,
+    bannerColor: user.bannerColor,
+  });
 });
 
-app.get('/me', authMiddleware, (req, res) => {
-  res.json({ id: req.user.id, username: req.user.username });
+app.get('/me', authMiddleware, async (req, res) => {
+  const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+  if (!user) return res.status(404).json({ error: 'User not found.' });
+  res.json({
+    id: user.id,
+    username: user.username,
+    avatarUrl: user.avatarUrl,
+    bannerUrl: user.bannerUrl,
+    bannerColor: user.bannerColor,
+  });
+});
+
+// --- PROFILE: update avatar/banner (persisted on the account, not the device) ---
+app.patch('/me/profile', authMiddleware, async (req, res) => {
+  const { avatarUrl, bannerUrl, bannerColor } = req.body;
+  const updated = await prisma.user.update({
+    where: { id: req.user.id },
+    data: {
+      ...(avatarUrl !== undefined ? { avatarUrl } : {}),
+      ...(bannerUrl !== undefined ? { bannerUrl } : {}),
+      ...(bannerColor !== undefined ? { bannerColor } : {}),
+    },
+  });
+  res.json({ avatarUrl: updated.avatarUrl, bannerUrl: updated.bannerUrl, bannerColor: updated.bannerColor });
 });
 
 // --- SERVERS: list/search (public-ish, but shows membership if logged in) ---
@@ -250,7 +279,7 @@ app.get('/servers/:id/members', authMiddleware, requireMembership(), async (req,
     where: { serverId: req.params.id },
     include: { user: true },
   });
-  res.json(members.map((m) => ({ id: m.id, userId: m.userId, username: m.user.username, role: m.role })));
+  res.json(members.map((m) => ({ id: m.id, userId: m.userId, username: m.user.username, role: m.role, avatarUrl: m.user.avatarUrl })));
 });
 
 app.post('/servers/:id/members/:userId/role', authMiddleware, requireRole(['owner', 'admin']), async (req, res) => {
@@ -263,6 +292,16 @@ app.post('/servers/:id/members/:userId/role', authMiddleware, requireRole(['owne
 
   const updated = await prisma.serverMember.update({ where: { id: target.id }, data: { role } });
   res.json(updated);
+});
+
+// --- MEMBERS: remove from server (owner/admin only, can't touch the owner) ---
+app.delete('/servers/:id/members/:userId', authMiddleware, requireRole(['owner', 'admin']), async (req, res) => {
+  const target = await getMembership(req.params.userId, req.params.id);
+  if (!target) return res.status(404).json({ error: 'Member not found.' });
+  if (target.role === 'owner') return res.status(400).json({ error: "Can't remove the owner." });
+
+  await prisma.serverMember.delete({ where: { id: target.id } });
+  res.json({ message: 'Member removed.' });
 });
 
 // --- CHAT ATTACHMENTS: upload a screenshot/clip, get back a URL to share ---
@@ -315,8 +354,13 @@ io.on('connection', (socket) => {
   });
 
   socket.on('send_message', (data) => {
-    // data: { channelId, sender, message }
+    // data: { channelId, sender, message, attachment?, senderAvatarUrl? }
     socket.broadcast.to(data.channelId).emit('receive_message', data);
+  });
+
+  // Real round-trip latency: client stamps the time, we echo it straight back.
+  socket.on('ping_check', (sentAt) => {
+    socket.emit('pong_check', sentAt);
   });
 });
 
