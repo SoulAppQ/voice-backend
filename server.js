@@ -42,6 +42,23 @@ const upload = multer({
   },
 });
 
+// ---- SOUNDBOARD UPLOADS ---------------------------------------------------
+// Separate, tighter multer instance: MP3 only, small size cap ("lightweight clips").
+const SOUNDBOARD_MIME = new Set(['audio/mpeg', 'audio/mp3']);
+const MAX_SOUNDBOARD_BYTES = 2 * 1024 * 1024; // 2MB — soundboard clips should be short
+
+const soundboardUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+    filename: (req, file, cb) => cb(null, `${crypto.randomUUID()}.mp3`),
+  }),
+  limits: { fileSize: MAX_SOUNDBOARD_BYTES },
+  fileFilter: (req, file, cb) => {
+    if (!SOUNDBOARD_MIME.has(file.mimetype)) return cb(new Error('Only MP3 clips are supported.'));
+    cb(null, true);
+  },
+});
+
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
@@ -347,6 +364,46 @@ app.post(
   }
 );
 
+// --- SOUNDBOARD: list clips for a server (any member) ---
+app.get('/servers/:id/soundboard', authMiddleware, requireMembership(), async (req, res) => {
+  const clips = await prisma.soundboardClip.findMany({
+    where: { serverId: req.params.id },
+    orderBy: { createdAt: 'asc' },
+  });
+  res.json(clips);
+});
+
+// --- SOUNDBOARD: upload a clip (any member, MP3 only, 2MB cap) ---
+app.post('/servers/:id/soundboard', authMiddleware, requireMembership(), (req, res) => {
+  soundboardUpload.single('file')(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message || 'Upload failed.' });
+    if (!req.file) return res.status(400).json({ error: 'No file provided.' });
+    const name = (req.body.name || req.file.originalname || 'clip').trim().slice(0, 40);
+    try {
+      const clip = await prisma.soundboardClip.create({
+        data: { name, url: `/uploads/${req.file.filename}`, serverId: req.params.id, uploaderId: req.user.id },
+      });
+      res.json(clip);
+    } catch (error) {
+      console.error('Soundboard upload failed:', error);
+      res.status(500).json({ error: 'Could not save the clip.' });
+    }
+  });
+});
+
+// --- SOUNDBOARD: delete a clip (uploader, or owner/admin) ---
+app.delete('/servers/:id/soundboard/:clipId', authMiddleware, requireMembership(), async (req, res) => {
+  const clip = await prisma.soundboardClip.findUnique({ where: { id: req.params.clipId } });
+  if (!clip || clip.serverId !== req.params.id) return res.status(404).json({ error: 'Clip not found.' });
+
+  const isUploader = clip.uploaderId === req.user.id;
+  const isManager = ['owner', 'admin'].includes(req.membership.role);
+  if (!isUploader && !isManager) return res.status(403).json({ error: 'Insufficient permissions.' });
+
+  await prisma.soundboardClip.delete({ where: { id: clip.id } });
+  res.json({ message: 'Clip deleted.' });
+});
+
 // --- LIVEKIT TOKEN GENERATOR ---
 // Identity now comes from the verified JWT (not a client-supplied query param),
 // and the caller must actually belong to the channel's server.
@@ -380,6 +437,12 @@ io.on('connection', (socket) => {
   socket.on('send_message', (data) => {
     // data: { channelId, sender, message, attachment?, senderAvatarUrl? }
     socket.broadcast.to(data.channelId).emit('receive_message', data);
+  });
+
+  socket.on('play_soundboard', (data) => {
+    // data: { channelId, clipId, name, url, sender }
+    // Broadcast only — the sender plays their own trigger locally without waiting on a round trip.
+    socket.broadcast.to(data.channelId).emit('play_soundboard', data);
   });
 
   // Real round-trip latency: client stamps the time, we echo it straight back.
