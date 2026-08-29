@@ -1,5 +1,9 @@
 const express = require('express');
 const http = require('http');
+const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
+const multer = require('multer');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const { AccessToken } = require('livekit-server-sdk');
@@ -11,6 +15,32 @@ const prisma = new PrismaClient();
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// ---- CLIP/SCREENSHOT UPLOADS ---------------------------------------------
+const UPLOAD_DIR = path.join(__dirname, 'uploads');
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR);
+app.use('/uploads', express.static(UPLOAD_DIR));
+
+const ALLOWED_MIME = new Set([
+  'image/png', 'image/jpeg', 'image/gif', 'image/webp',
+  'video/mp4', 'video/webm', 'video/quicktime',
+]);
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50MB, plenty for a short clip
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname).slice(0, 10);
+      cb(null, `${crypto.randomUUID()}${ext}`);
+    },
+  }),
+  limits: { fileSize: MAX_UPLOAD_BYTES },
+  fileFilter: (req, file, cb) => {
+    if (!ALLOWED_MIME.has(file.mimetype)) return cb(new Error('Unsupported file type.'));
+    cb(null, true);
+  },
+});
 
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
@@ -201,6 +231,25 @@ app.post('/servers/:id/members/:userId/role', authMiddleware, requireRole(['owne
   const updated = await prisma.serverMember.update({ where: { id: target.id }, data: { role } });
   res.json(updated);
 });
+
+// --- CHAT ATTACHMENTS: upload a screenshot/clip, get back a URL to share ---
+// Membership is checked so only people in the server can drop files for it.
+app.post(
+  '/servers/:id/upload',
+  authMiddleware,
+  requireMembership(),
+  (req, res) => {
+    upload.single('file')(req, res, (err) => {
+      if (err) return res.status(400).json({ error: err.message || 'Upload failed.' });
+      if (!req.file) return res.status(400).json({ error: 'No file provided.' });
+      res.json({
+        url: `/uploads/${req.file.filename}`,
+        mimeType: req.file.mimetype,
+        kind: req.file.mimetype.startsWith('video/') ? 'video' : 'image',
+      });
+    });
+  }
+);
 
 // --- LIVEKIT TOKEN GENERATOR ---
 // Identity now comes from the verified JWT (not a client-supplied query param),
