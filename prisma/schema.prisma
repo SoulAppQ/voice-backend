@@ -18,12 +18,24 @@ model User {
 }
 
 model Server {
-  id        String         @id @default(uuid())
-  name      String
-  ownerId   String
-  createdAt DateTime       @default(now())
-  channels  Channel[]
-  members   ServerMember[]
+  id              String           @id @default(uuid())
+  name            String
+  ownerId         String
+  createdAt       DateTime         @default(now())
+  channels        Channel[]
+  members         ServerMember[]
+  soundboardClips SoundboardClip[]
+}
+
+// A short MP3 clip a member uploaded for instant playback in this server's voice channels.
+model SoundboardClip {
+  id         String   @id @default(uuid())
+  name       String
+  url        String
+  serverId   String
+  uploaderId String
+  createdAt  DateTime @default(now())
+  server     Server   @relation(fields: [serverId], references: [id])
 }
 
 model Channel {
