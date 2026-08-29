@@ -1,0 +1,44 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          String         @id @default(uuid())
+  username    String         @unique
+  password    String
+  memberships ServerMember[]
+}
+
+model Server {
+  id        String         @id @default(uuid())
+  name      String
+  ownerId   String
+  createdAt DateTime       @default(now())
+  channels  Channel[]
+  members   ServerMember[]
+}
+
+model Channel {
+  id       String @id @default(uuid())
+  name     String
+  serverId String
+  server   Server @relation(fields: [serverId], references: [id])
+}
+
+// Join table: who belongs to which server, and with what role.
+// role is one of: "owner" | "admin" | "member"
+model ServerMember {
+  id       String @id @default(uuid())
+  userId   String
+  serverId String
+  role     String @default("member")
+  user     User   @relation(fields: [userId], references: [id])
+  server   Server @relation(fields: [serverId], references: [id])
+
+  @@unique([userId, serverId])
+}
