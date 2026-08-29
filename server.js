@@ -295,7 +295,15 @@ app.get('/servers/:id/members', authMiddleware, requireMembership(), async (req,
     where: { serverId: req.params.id },
     include: { user: true },
   });
-  res.json(members.map((m) => ({ id: m.id, userId: m.userId, username: m.user.username, role: m.role, avatarUrl: m.user.avatarUrl })));
+  res.json(members.map((m) => ({
+    id: m.id,
+    userId: m.userId,
+    username: m.user.username,
+    role: m.role,
+    avatarUrl: m.user.avatarUrl,
+    bannerUrl: m.user.bannerUrl,
+    bannerColor: m.user.bannerColor,
+  })));
 });
 
 app.post('/servers/:id/members/:userId/role', authMiddleware, requireRole(['owner', 'admin']), async (req, res) => {
