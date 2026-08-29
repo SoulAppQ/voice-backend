@@ -11,11 +11,16 @@ const io = new Server(server, { cors: { origin: "*" } });
 
 // --- LIVEKIT TOKEN GENERATOR ---
 app.get('/getToken', async (req, res) => {
-
   const participantName = req.query.username || 'Guest-' + Math.floor(Math.random() * 100);
   const roomName = req.query.room || 'General';
 
-  const at = new AccessToken('APIbm8dK7dHvr3i', 'OWnW1c5taUEwiZzsaDfG1BcQeyn9WAZjWBMaCqz8ZMx', { identity: participantName });
+  // Pull keys securely from environment variables
+  const at = new AccessToken(
+    process.env.LIVEKIT_API_KEY, 
+    process.env.LIVEKIT_API_SECRET, 
+    { identity: participantName }
+  );
+  
   at.addGrant({ roomJoin: true, room: roomName, canPublish: true, canSubscribe: true });
 
   const token = await at.toJwt();
