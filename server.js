@@ -10,12 +10,56 @@ const jwt = require('jsonwebtoken');
 const prisma = new PrismaClient();
 const app = express();
 app.use(cors());
-app.use(express.json()); // Required to read incoming passwords
+app.use(express.json());
 
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-key-for-now';
+
+// ---- AUTH HELPERS --------------------------------------------------------
+function authMiddleware(req, res, next) {
+  const header = req.headers.authorization;
+  if (!header) return res.status(401).json({ error: 'Missing token' });
+  try {
+    req.user = jwt.verify(header.replace('Bearer ', ''), JWT_SECRET); // { id, username }
+    next();
+  } catch {
+    res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
+function optionalAuth(req, res, next) {
+  const header = req.headers.authorization;
+  if (header) {
+    try { req.user = jwt.verify(header.replace('Bearer ', ''), JWT_SECRET); } catch { /* ignore */ }
+  }
+  next();
+}
+
+async function getMembership(userId, serverId) {
+  return prisma.serverMember.findUnique({ where: { userId_serverId: { userId, serverId } } });
+}
+
+function requireMembership() {
+  return async (req, res, next) => {
+    const membership = await getMembership(req.user.id, req.params.id);
+    if (!membership) return res.status(403).json({ error: 'Not a member of this server' });
+    req.membership = membership;
+    next();
+  };
+}
+
+function requireRole(roles) {
+  return async (req, res, next) => {
+    const membership = await getMembership(req.user.id, req.params.id);
+    if (!membership || !roles.includes(membership.role)) {
+      return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+    req.membership = membership;
+    next();
+  };
+}
 
 // --- AUTO-GENERATE 'CO CO' SERVER ---
 async function initDefaultServer() {
@@ -36,11 +80,10 @@ initDefaultServer();
 // --- SECURE REGISTRATION ---
 app.post('/register', async (req, res) => {
   const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ error: 'Username and password required.' });
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
-    await prisma.user.create({
-      data: { username, password: hashedPassword }
-    });
+    await prisma.user.create({ data: { username, password: hashedPassword } });
     res.json({ message: 'Registration successful!' });
   } catch (error) {
     res.status(400).json({ error: 'Gamertag already taken.' });
@@ -51,33 +94,148 @@ app.post('/register', async (req, res) => {
 app.post('/login', async (req, res) => {
   const { username, password } = req.body;
   const user = await prisma.user.findUnique({ where: { username } });
-  
+
   if (!user || !(await bcrypt.compare(password, user.password))) {
     return res.status(401).json({ error: 'Invalid credentials.' });
   }
-  
-  // Issue a secure identity token for this session
+
   const authToken = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET);
   res.json({ authToken, username: user.username, userId: user.id });
 });
 
+app.get('/me', authMiddleware, (req, res) => {
+  res.json({ id: req.user.id, username: req.user.username });
+});
+
+// --- SERVERS: list/search (public-ish, but shows membership if logged in) ---
+app.get('/servers', optionalAuth, async (req, res) => {
+  const search = (req.query.search || '').trim();
+  const servers = await prisma.server.findMany({
+    where: search ? { name: { contains: search, mode: 'insensitive' } } : undefined,
+    include: { members: true, channels: true },
+    orderBy: { createdAt: 'asc' },
+  });
+
+  res.json(servers.map((s) => ({
+    id: s.id,
+    name: s.name,
+    memberCount: s.members.length,
+    channelCount: s.channels.length,
+    isMember: req.user ? s.members.some((m) => m.userId === req.user.id) : false,
+    myRole: req.user ? (s.members.find((m) => m.userId === req.user.id)?.role || null) : null,
+  })));
+});
+
+// --- SERVERS: create (creator becomes owner + gets a default channel) ---
+app.post('/servers', authMiddleware, async (req, res) => {
+  const name = (req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Server name required.' });
+
+  const newServer = await prisma.server.create({
+    data: {
+      name,
+      ownerId: req.user.id,
+      channels: { create: [{ name: 'General Lounge' }] },
+      members: { create: [{ userId: req.user.id, role: 'owner' }] },
+    },
+    include: { channels: true, members: true },
+  });
+  res.json(newServer);
+});
+
+// --- SERVERS: join / leave ---
+app.post('/servers/:id/join', authMiddleware, async (req, res) => {
+  const serverId = req.params.id;
+  const existing = await getMembership(req.user.id, serverId);
+  if (existing) return res.json(existing);
+
+  const serverExists = await prisma.server.findUnique({ where: { id: serverId } });
+  if (!serverExists) return res.status(404).json({ error: 'Server not found.' });
+
+  const member = await prisma.serverMember.create({
+    data: { userId: req.user.id, serverId, role: 'member' },
+  });
+  res.json(member);
+});
+
+app.post('/servers/:id/leave', authMiddleware, async (req, res) => {
+  const membership = await getMembership(req.user.id, req.params.id);
+  if (!membership) return res.status(400).json({ error: 'Not a member of this server.' });
+  if (membership.role === 'owner') {
+    return res.status(400).json({ error: 'Owners cannot leave their own server.' });
+  }
+  await prisma.serverMember.delete({ where: { id: membership.id } });
+  res.json({ message: 'Left server.' });
+});
+
+// --- CHANNELS: list / create (create = owner/admin only) ---
+app.get('/servers/:id/channels', authMiddleware, requireMembership(), async (req, res) => {
+  const channels = await prisma.channel.findMany({ where: { serverId: req.params.id } });
+  res.json(channels);
+});
+
+app.post('/servers/:id/channels', authMiddleware, requireRole(['owner', 'admin']), async (req, res) => {
+  const name = (req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Channel name required.' });
+  const channel = await prisma.channel.create({ data: { name, serverId: req.params.id } });
+  res.json(channel);
+});
+
+// --- MEMBERS: list / change role (owner/admin only, can't touch the owner) ---
+app.get('/servers/:id/members', authMiddleware, requireMembership(), async (req, res) => {
+  const members = await prisma.serverMember.findMany({
+    where: { serverId: req.params.id },
+    include: { user: true },
+  });
+  res.json(members.map((m) => ({ id: m.id, userId: m.userId, username: m.user.username, role: m.role })));
+});
+
+app.post('/servers/:id/members/:userId/role', authMiddleware, requireRole(['owner', 'admin']), async (req, res) => {
+  const { role } = req.body;
+  if (!['admin', 'member'].includes(role)) return res.status(400).json({ error: 'Role must be admin or member.' });
+
+  const target = await getMembership(req.params.userId, req.params.id);
+  if (!target) return res.status(404).json({ error: 'Member not found.' });
+  if (target.role === 'owner') return res.status(400).json({ error: "Can't change the owner's role." });
+
+  const updated = await prisma.serverMember.update({ where: { id: target.id }, data: { role } });
+  res.json(updated);
+});
+
 // --- LIVEKIT TOKEN GENERATOR ---
-app.get('/getToken', async (req, res) => {
-  const participantName = req.query.username || 'Guest-' + Math.floor(Math.random() * 100);
-  const roomName = req.query.room || 'General';
+// Identity now comes from the verified JWT (not a client-supplied query param),
+// and the caller must actually belong to the channel's server.
+app.get('/getToken', authMiddleware, async (req, res) => {
+  const channelId = req.query.channelId;
+  if (!channelId) return res.status(400).json({ error: 'channelId is required.' });
+
+  const channel = await prisma.channel.findUnique({ where: { id: channelId } });
+  if (!channel) return res.status(404).json({ error: 'Channel not found.' });
+
+  const membership = await getMembership(req.user.id, channel.serverId);
+  if (!membership) return res.status(403).json({ error: 'Not a member of this server.' });
 
   const at = new AccessToken(
-    process.env.LIVEKIT_API_KEY, 
-    process.env.LIVEKIT_API_SECRET, 
-    { identity: participantName }
+    process.env.LIVEKIT_API_KEY,
+    process.env.LIVEKIT_API_SECRET,
+    { identity: req.user.username }
   );
-  
-  at.addGrant({ roomJoin: true, room: roomName, canPublish: true, canSubscribe: true });
+  at.addGrant({ roomJoin: true, room: channelId, canPublish: true, canSubscribe: true });
   res.send({ token: await at.toJwt() });
 });
 
+// --- CHAT: scoped per channel, not global ---
 io.on('connection', (socket) => {
-  socket.on('send_message', (data) => socket.broadcast.emit('receive_message', data));
+  socket.on('join_channel', (channelId) => {
+    // leave any previously-joined channel rooms before joining the new one
+    [...socket.rooms].forEach((r) => { if (r !== socket.id) socket.leave(r); });
+    socket.join(channelId);
+  });
+
+  socket.on('send_message', (data) => {
+    // data: { channelId, sender, message }
+    socket.broadcast.to(data.channelId).emit('receive_message', data);
+  });
 });
 
 server.listen(3001, () => console.log('Signaling server running on port 3001'));
