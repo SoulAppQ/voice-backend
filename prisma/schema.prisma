@@ -14,7 +14,22 @@ model User {
   avatarUrl   String?
   bannerUrl   String?
   bannerColor String?
+  statusText  String?
+  statusEmoji String?
+  createdAt   DateTime       @default(now())
   memberships ServerMember[]
+  messages    Message[]
+  badges      UserBadge[]
+  invites     Invite[]
+
+  sentFriendRequests     FriendRequest[] @relation("FriendRequestSender")
+  receivedFriendRequests FriendRequest[] @relation("FriendRequestRecipient")
+
+  friendshipsAsA Friendship[] @relation("FriendshipUserA")
+  friendshipsAsB Friendship[] @relation("FriendshipUserB")
+
+  sentDMs     DirectMessage[] @relation("DMSender")
+  receivedDMs DirectMessage[] @relation("DMRecipient")
 }
 
 model Server {
@@ -25,6 +40,7 @@ model Server {
   channels        Channel[]
   members         ServerMember[]
   soundboardClips SoundboardClip[]
+  invites         Invite[]
 }
 
 // A short MP3 clip a member uploaded for instant playback in this server's voice channels.
@@ -39,10 +55,31 @@ model SoundboardClip {
 }
 
 model Channel {
-  id       String @id @default(uuid())
+  id       String    @id @default(uuid())
   name     String
   serverId String
-  server   Server @relation(fields: [serverId], references: [id])
+  server   Server    @relation(fields: [serverId], references: [id])
+  messages Message[]
+}
+
+// A persisted text message in a channel. Sender name/avatar are snapshotted
+// at send-time so history still renders correctly even if the user later
+// changes their name or avatar.
+model Message {
+  id              String   @id @default(uuid())
+  channelId       String
+  senderId        String
+  sender          String
+  senderAvatarUrl String?
+  content         String
+  attachmentUrl   String?
+  attachmentKind  String?
+  pinned          Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  channel         Channel  @relation(fields: [channelId], references: [id])
+  user            User     @relation(fields: [senderId], references: [id])
+
+  @@index([channelId])
 }
 
 // Join table: who belongs to which server, and with what role.
@@ -56,4 +93,73 @@ model ServerMember {
   server   Server @relation(fields: [serverId], references: [id])
 
   @@unique([userId, serverId])
+}
+
+// A shareable join code for a server. Optional expiry and use-limit.
+model Invite {
+  id          String    @id @default(uuid())
+  code        String    @unique
+  serverId    String
+  createdById String
+  maxUses     Int?
+  uses        Int       @default(0)
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+  server      Server    @relation(fields: [serverId], references: [id])
+  createdBy   User      @relation(fields: [createdById], references: [id])
+}
+
+// A pending/accepted/declined friend request between two accounts.
+model FriendRequest {
+  id          String   @id @default(uuid())
+  senderId    String
+  recipientId String
+  status      String   @default("pending") // pending | accepted | declined
+  createdAt   DateTime @default(now())
+  sender      User     @relation("FriendRequestSender", fields: [senderId], references: [id])
+  recipient   User     @relation("FriendRequestRecipient", fields: [recipientId], references: [id])
+
+  @@unique([senderId, recipientId])
+}
+
+// A confirmed, symmetric friendship. userAId is always the lexicographically
+// smaller id so a pair only ever has one row, regardless of who accepted.
+model Friendship {
+  id        String   @id @default(uuid())
+  userAId   String
+  userBId   String
+  createdAt DateTime @default(now())
+  userA     User     @relation("FriendshipUserA", fields: [userAId], references: [id])
+  userB     User     @relation("FriendshipUserB", fields: [userBId], references: [id])
+
+  @@unique([userAId, userBId])
+}
+
+// A direct message between two friends, outside any server.
+model DirectMessage {
+  id             String   @id @default(uuid())
+  senderId       String
+  recipientId    String
+  content        String
+  attachmentUrl  String?
+  attachmentKind String?
+  createdAt      DateTime @default(now())
+  sender         User     @relation("DMSender", fields: [senderId], references: [id])
+  recipient      User     @relation("DMRecipient", fields: [recipientId], references: [id])
+
+  @@index([senderId, recipientId])
+}
+
+// Small account-level badges (Founder, Supporter, etc) shown next to a
+// username everywhere, separate from per-server roles.
+model UserBadge {
+  id        String   @id @default(uuid())
+  userId    String
+  key       String
+  label     String
+  color     String   @default("#d4a24c")
+  awardedAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@unique([userId, key])
 }

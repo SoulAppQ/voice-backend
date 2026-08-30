@@ -114,6 +114,30 @@ function requireRole(roles) {
   };
 }
 
+// ---- SHARED SERIALIZERS ---------------------------------------------------
+async function badgesFor(userId) {
+  const rows = await prisma.userBadge.findMany({ where: { userId } });
+  return rows.map((b) => ({ id: b.id, key: b.key, label: b.label, color: b.color }));
+}
+
+function attachmentFromMessage(m) {
+  return m.attachmentUrl ? { url: m.attachmentUrl, kind: m.attachmentKind || 'image' } : null;
+}
+
+function serializeMessage(m) {
+  return {
+    id: m.id,
+    channelId: m.channelId,
+    sender: m.sender,
+    senderId: m.senderId,
+    senderAvatarUrl: m.senderAvatarUrl,
+    content: m.content,
+    attachment: attachmentFromMessage(m),
+    pinned: m.pinned,
+    createdAt: m.createdAt,
+  };
+}
+
 // --- AUTO-GENERATE 'CO CO' SERVER ---
 async function initDefaultServer() {
   const existing = await prisma.server.findFirst({ where: { name: 'CO CO' } });
@@ -136,7 +160,14 @@ app.post('/register', async (req, res) => {
   if (!username || !password) return res.status(400).json({ error: 'Username and password required.' });
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
-    await prisma.user.create({ data: { username, password: hashedPassword } });
+    const isFirstUser = (await prisma.user.count()) === 0;
+    const created = await prisma.user.create({ data: { username, password: hashedPassword } });
+    // The very first account ever registered gets a permanent "Founder" badge.
+    if (isFirstUser) {
+      await prisma.userBadge.create({
+        data: { userId: created.id, key: 'founder', label: 'Founder', color: '#d4a24c' },
+      }).catch(() => {});
+    }
     res.json({ message: 'Registration successful!' });
   } catch (error) {
     res.status(400).json({ error: 'Gamertag already taken.' });
@@ -178,6 +209,9 @@ app.get('/me', authMiddleware, async (req, res) => {
       avatarUrl: user.avatarUrl,
       bannerUrl: user.bannerUrl,
       bannerColor: user.bannerColor,
+      statusText: user.statusText,
+      statusEmoji: user.statusEmoji,
+      badges: await badgesFor(user.id),
     });
   } catch (err) {
     console.error('GET /me failed:', err);
@@ -185,19 +219,26 @@ app.get('/me', authMiddleware, async (req, res) => {
   }
 });
 
-// --- PROFILE: update avatar/banner (persisted on the account, not the device) ---
+// --- PROFILE: update avatar/banner/status (persisted on the account, not the device) ---
 app.patch('/me/profile', authMiddleware, async (req, res) => {
   try {
-    const { avatarUrl, bannerUrl, bannerColor } = req.body;
+    const { avatarUrl, bannerUrl, bannerColor, statusText, statusEmoji } = req.body;
     const updated = await prisma.user.update({
       where: { id: req.user.id },
       data: {
         ...(avatarUrl !== undefined ? { avatarUrl } : {}),
         ...(bannerUrl !== undefined ? { bannerUrl } : {}),
         ...(bannerColor !== undefined ? { bannerColor } : {}),
+        ...(statusText !== undefined ? { statusText: statusText ? statusText.slice(0, 100) : null } : {}),
+        ...(statusEmoji !== undefined ? { statusEmoji: statusEmoji ? statusEmoji.slice(0, 8) : null } : {}),
       },
     });
-    res.json({ avatarUrl: updated.avatarUrl, bannerUrl: updated.bannerUrl, bannerColor: updated.bannerColor });
+    res.json({
+      avatarUrl: updated.avatarUrl, bannerUrl: updated.bannerUrl, bannerColor: updated.bannerColor,
+      statusText: updated.statusText, statusEmoji: updated.statusEmoji, badges: await badgesFor(updated.id),
+    });
+    // Let anyone sharing a server with this user refresh their live status pill.
+    io.emit('presence_updated', { userId: updated.id, statusText: updated.statusText, statusEmoji: updated.statusEmoji });
   } catch (err) {
     // Most common cause: the DB migration adding these columns hasn't been run yet.
     console.error('PATCH /me/profile failed:', err);
@@ -278,7 +319,10 @@ app.post('/profile/upload', authMiddleware, (req, res) => {
 // --- SERVERS: delete (owner only — wipes its channels + memberships too) ---
 app.delete('/servers/:id', authMiddleware, requireRole(['owner']), async (req, res) => {
   const serverId = req.params.id;
+  const channels = await prisma.channel.findMany({ where: { serverId }, select: { id: true } });
   await prisma.$transaction([
+    prisma.message.deleteMany({ where: { channelId: { in: channels.map((c) => c.id) } } }),
+    prisma.invite.deleteMany({ where: { serverId } }),
     prisma.serverMember.deleteMany({ where: { serverId } }),
     prisma.channel.deleteMany({ where: { serverId } }),
     prisma.server.delete({ where: { id: serverId } }),
@@ -308,6 +352,7 @@ app.delete('/servers/:id/channels/:channelId', authMiddleware, requireRole(['own
   const remaining = await prisma.channel.count({ where: { serverId } });
   if (remaining <= 1) return res.status(400).json({ error: 'A server needs at least one room.' });
 
+  await prisma.message.deleteMany({ where: { channelId } });
   await prisma.channel.delete({ where: { id: channelId } });
   res.json({ message: 'Room deleted.' });
 });
@@ -318,7 +363,7 @@ app.get('/servers/:id/members', authMiddleware, requireMembership(), async (req,
     where: { serverId: req.params.id },
     include: { user: true },
   });
-  res.json(members.map((m) => ({
+  const withBadges = await Promise.all(members.map(async (m) => ({
     id: m.id,
     userId: m.userId,
     username: m.user.username,
@@ -326,7 +371,11 @@ app.get('/servers/:id/members', authMiddleware, requireMembership(), async (req,
     avatarUrl: m.user.avatarUrl,
     bannerUrl: m.user.bannerUrl,
     bannerColor: m.user.bannerColor,
+    statusText: m.user.statusText,
+    statusEmoji: m.user.statusEmoji,
+    badges: await badgesFor(m.userId),
   })));
+  res.json(withBadges);
 });
 
 app.post('/servers/:id/members/:userId/role', authMiddleware, requireRole(['owner', 'admin']), async (req, res) => {
@@ -369,6 +418,224 @@ app.post(
     });
   }
 );
+
+// --- MESSAGES: channel history + pinning -----------------------------------
+app.get('/servers/:id/channels/:channelId/messages', authMiddleware, requireMembership(), async (req, res) => {
+  try {
+    const channel = await prisma.channel.findUnique({ where: { id: req.params.channelId } });
+    if (!channel || channel.serverId !== req.params.id) return res.status(404).json({ error: 'Room not found.' });
+    const limit = Math.min(parseInt(req.query.limit, 10) || 100, 200);
+    const messages = await prisma.message.findMany({
+      where: { channelId: req.params.channelId },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    });
+    res.json(messages.reverse().map(serializeMessage));
+  } catch (err) {
+    console.error('GET messages failed:', err);
+    res.status(500).json({ error: 'Could not load message history. Has the database migration been run?' });
+  }
+});
+
+app.get('/servers/:id/channels/:channelId/pinned', authMiddleware, requireMembership(), async (req, res) => {
+  try {
+    const pinned = await prisma.message.findMany({
+      where: { channelId: req.params.channelId, pinned: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    res.json(pinned.map(serializeMessage));
+  } catch (err) {
+    console.error('GET pinned failed:', err);
+    res.status(500).json({ error: 'Could not load pinned messages.' });
+  }
+});
+
+app.post('/servers/:id/channels/:channelId/messages/:messageId/pin', authMiddleware, requireMembership(), async (req, res) => {
+  try {
+    const msg = await prisma.message.update({ where: { id: req.params.messageId }, data: { pinned: true } });
+    const payload = serializeMessage(msg);
+    io.to(req.params.channelId).emit('message_pinned', payload);
+    res.json(payload);
+  } catch (err) {
+    res.status(404).json({ error: 'Message not found.' });
+  }
+});
+
+app.delete('/servers/:id/channels/:channelId/messages/:messageId/pin', authMiddleware, requireMembership(), async (req, res) => {
+  try {
+    const msg = await prisma.message.update({ where: { id: req.params.messageId }, data: { pinned: false } });
+    io.to(req.params.channelId).emit('message_unpinned', { id: msg.id });
+    res.json({ id: msg.id });
+  } catch (err) {
+    res.status(404).json({ error: 'Message not found.' });
+  }
+});
+
+// --- INVITES: create a shareable join code, or join a server by one --------
+app.post('/servers/:id/invites', authMiddleware, requireRole(['owner', 'admin']), async (req, res) => {
+  const { maxUses, expiresInHours } = req.body || {};
+  const invite = await prisma.invite.create({
+    data: {
+      code: crypto.randomBytes(4).toString('hex'),
+      serverId: req.params.id,
+      createdById: req.user.id,
+      maxUses: maxUses ? parseInt(maxUses, 10) : null,
+      expiresAt: expiresInHours ? new Date(Date.now() + expiresInHours * 3600 * 1000) : null,
+    },
+  });
+  res.json(invite);
+});
+
+app.get('/servers/:id/invites', authMiddleware, requireRole(['owner', 'admin']), async (req, res) => {
+  const invites = await prisma.invite.findMany({ where: { serverId: req.params.id }, orderBy: { createdAt: 'desc' } });
+  res.json(invites);
+});
+
+app.delete('/servers/:id/invites/:inviteId', authMiddleware, requireRole(['owner', 'admin']), async (req, res) => {
+  await prisma.invite.deleteMany({ where: { id: req.params.inviteId, serverId: req.params.id } });
+  res.json({ message: 'Invite revoked.' });
+});
+
+// Look up (without joining) what an invite code points to, so the client can show a preview.
+app.get('/invites/:code', optionalAuth, async (req, res) => {
+  const invite = await prisma.invite.findUnique({ where: { code: req.params.code }, include: { server: true } });
+  if (!invite) return res.status(404).json({ error: 'Invite not found or expired.' });
+  if (invite.expiresAt && invite.expiresAt < new Date()) return res.status(410).json({ error: 'This invite has expired.' });
+  if (invite.maxUses && invite.uses >= invite.maxUses) return res.status(410).json({ error: 'This invite has reached its use limit.' });
+  res.json({ serverId: invite.serverId, serverName: invite.server.name });
+});
+
+app.post('/invites/:code/join', authMiddleware, async (req, res) => {
+  const invite = await prisma.invite.findUnique({ where: { code: req.params.code } });
+  if (!invite) return res.status(404).json({ error: 'Invite not found or expired.' });
+  if (invite.expiresAt && invite.expiresAt < new Date()) return res.status(410).json({ error: 'This invite has expired.' });
+  if (invite.maxUses && invite.uses >= invite.maxUses) return res.status(410).json({ error: 'This invite has reached its use limit.' });
+
+  const existing = await getMembership(req.user.id, invite.serverId);
+  if (!existing) {
+    await prisma.$transaction([
+      prisma.serverMember.create({ data: { userId: req.user.id, serverId: invite.serverId, role: 'member' } }),
+      prisma.invite.update({ where: { id: invite.id }, data: { uses: { increment: 1 } } }),
+    ]);
+  }
+  res.json({ serverId: invite.serverId });
+});
+
+// --- FRIENDS: requests + friend list ----------------------------------------
+function friendPairKey(idA, idB) {
+  return idA < idB ? { userAId: idA, userBId: idB } : { userAId: idB, userBId: idA };
+}
+
+app.get('/friends', authMiddleware, async (req, res) => {
+  const friendships = await prisma.friendship.findMany({
+    where: { OR: [{ userAId: req.user.id }, { userBId: req.user.id }] },
+    include: { userA: true, userB: true },
+  });
+  res.json(friendships.map((f) => {
+    const friend = f.userAId === req.user.id ? f.userB : f.userA;
+    return { friendshipId: f.id, id: friend.id, username: friend.username, avatarUrl: friend.avatarUrl, statusText: friend.statusText, statusEmoji: friend.statusEmoji };
+  }));
+});
+
+app.get('/friends/requests', authMiddleware, async (req, res) => {
+  const [incoming, outgoing] = await Promise.all([
+    prisma.friendRequest.findMany({ where: { recipientId: req.user.id, status: 'pending' }, include: { sender: true } }),
+    prisma.friendRequest.findMany({ where: { senderId: req.user.id, status: 'pending' }, include: { recipient: true } }),
+  ]);
+  res.json({
+    incoming: incoming.map((r) => ({ id: r.id, username: r.sender.username, userId: r.senderId, avatarUrl: r.sender.avatarUrl })),
+    outgoing: outgoing.map((r) => ({ id: r.id, username: r.recipient.username, userId: r.recipientId, avatarUrl: r.recipient.avatarUrl })),
+  });
+});
+
+app.post('/friends/requests', authMiddleware, async (req, res) => {
+  const username = (req.body.username || '').trim();
+  if (!username) return res.status(400).json({ error: 'Username required.' });
+  const target = await prisma.user.findUnique({ where: { username } });
+  if (!target) return res.status(404).json({ error: 'No one with that username.' });
+  if (target.id === req.user.id) return res.status(400).json({ error: "You can't friend yourself." });
+
+  const already = await prisma.friendship.findUnique({ where: { userAId_userBId: friendPairKey(req.user.id, target.id) } });
+  if (already) return res.status(400).json({ error: 'Already friends.' });
+
+  try {
+    const request = await prisma.friendRequest.create({
+      data: { senderId: req.user.id, recipientId: target.id },
+    });
+    io.to(`user:${target.id}`).emit('friend_request_received', { id: request.id, username: req.user.username, userId: req.user.id });
+    res.json(request);
+  } catch {
+    res.status(400).json({ error: 'Request already sent.' });
+  }
+});
+
+app.post('/friends/requests/:id/accept', authMiddleware, async (req, res) => {
+  const request = await prisma.friendRequest.findUnique({ where: { id: req.params.id } });
+  if (!request || request.recipientId !== req.user.id) return res.status(404).json({ error: 'Request not found.' });
+
+  const [friendship] = await prisma.$transaction([
+    prisma.friendship.create({ data: friendPairKey(request.senderId, request.recipientId) }),
+    prisma.friendRequest.update({ where: { id: request.id }, data: { status: 'accepted' } }),
+  ]);
+  io.to(`user:${request.senderId}`).emit('friend_request_accepted', { by: req.user.username, userId: req.user.id });
+  res.json(friendship);
+});
+
+app.post('/friends/requests/:id/decline', authMiddleware, async (req, res) => {
+  const request = await prisma.friendRequest.findUnique({ where: { id: req.params.id } });
+  if (!request || request.recipientId !== req.user.id) return res.status(404).json({ error: 'Request not found.' });
+  await prisma.friendRequest.update({ where: { id: request.id }, data: { status: 'declined' } });
+  res.json({ message: 'Declined.' });
+});
+
+app.delete('/friends/:userId', authMiddleware, async (req, res) => {
+  await prisma.friendship.deleteMany({ where: friendPairKey(req.user.id, req.params.userId) });
+  res.json({ message: 'Unfriended.' });
+});
+
+// --- DIRECT MESSAGES: history + send (friends only) -------------------------
+app.get('/dms/:userId', authMiddleware, async (req, res) => {
+  const friendship = await prisma.friendship.findUnique({ where: { userAId_userBId: friendPairKey(req.user.id, req.params.userId) } });
+  if (!friendship) return res.status(403).json({ error: 'You can only DM friends.' });
+
+  const messages = await prisma.directMessage.findMany({
+    where: {
+      OR: [
+        { senderId: req.user.id, recipientId: req.params.userId },
+        { senderId: req.params.userId, recipientId: req.user.id },
+      ],
+    },
+    orderBy: { createdAt: 'asc' },
+    take: 200,
+  });
+  res.json(messages.map((m) => ({
+    id: m.id, senderId: m.senderId, recipientId: m.recipientId, content: m.content,
+    attachment: m.attachmentUrl ? { url: m.attachmentUrl, kind: m.attachmentKind || 'image' } : null,
+    createdAt: m.createdAt,
+  })));
+});
+
+app.post('/dms/:userId', authMiddleware, async (req, res) => {
+  const friendship = await prisma.friendship.findUnique({ where: { userAId_userBId: friendPairKey(req.user.id, req.params.userId) } });
+  if (!friendship) return res.status(403).json({ error: 'You can only DM friends.' });
+
+  const { content, attachment } = req.body;
+  if (!content && !attachment) return res.status(400).json({ error: 'Empty message.' });
+
+  const dm = await prisma.directMessage.create({
+    data: {
+      senderId: req.user.id, recipientId: req.params.userId, content: content || '',
+      attachmentUrl: attachment?.url || null, attachmentKind: attachment?.kind || null,
+    },
+  });
+  const payload = {
+    id: dm.id, senderId: dm.senderId, recipientId: dm.recipientId, content: dm.content,
+    attachment: dm.attachmentUrl ? { url: dm.attachmentUrl, kind: dm.attachmentKind } : null, createdAt: dm.createdAt,
+  };
+  io.to(`user:${req.params.userId}`).emit('dm_received', payload);
+  io.to(`user:${req.user.id}`).emit('dm_received', payload);
+  res.json(payload);
+});
 
 // --- SOUNDBOARD: list clips for a server (any member) ---
 app.get('/servers/:id/soundboard', authMiddleware, requireMembership(), async (req, res) => {
@@ -446,13 +713,37 @@ app.get('/getToken', authMiddleware, async (req, res) => {
 io.on('connection', (socket) => {
   socket.on('join_channel', (channelId) => {
     // leave any previously-joined channel rooms before joining the new one
-    [...socket.rooms].forEach((r) => { if (r !== socket.id) socket.leave(r); });
+    [...socket.rooms].forEach((r) => { if (r !== socket.id && !r.startsWith('user:')) socket.leave(r); });
     socket.join(channelId);
   });
 
-  socket.on('send_message', (data) => {
-    // data: { channelId, sender, message, attachment?, senderAvatarUrl? }
-    socket.broadcast.to(data.channelId).emit('receive_message', data);
+  // A private room the socket sits in for its whole session, used to deliver
+  // DMs and friend-request notifications straight to a specific person.
+  socket.on('identify', (userId) => {
+    if (userId) socket.join(`user:${userId}`);
+  });
+
+  socket.on('send_message', async (data) => {
+    // data: { channelId, sender, senderId, message, attachment?, senderAvatarUrl? }
+    try {
+      const saved = await prisma.message.create({
+        data: {
+          channelId: data.channelId,
+          senderId: data.senderId,
+          sender: data.sender,
+          senderAvatarUrl: data.senderAvatarUrl || null,
+          content: data.message || '',
+          attachmentUrl: data.attachment?.url || null,
+          attachmentKind: data.attachment?.kind || null,
+        },
+      });
+      io.to(data.channelId).emit('receive_message', serializeMessage(saved));
+    } catch (err) {
+      console.error('send_message persist failed:', err);
+      // Fall back to a non-persisted broadcast so the room isn't dead in the water
+      // even if the DB migration hasn't been run yet.
+      socket.broadcast.to(data.channelId).emit('receive_message', { ...data, id: crypto.randomUUID() });
+    }
   });
 
   socket.on('typing', (data) => {
@@ -463,6 +754,18 @@ io.on('connection', (socket) => {
     // data: { channelId, clipId, name, url, sender }
     // Broadcast only — the sender plays their own trigger locally without waiting on a round trip.
     socket.broadcast.to(data.channelId).emit('play_soundboard', data);
+  });
+
+  // "Now playing" bar for a voice channel — one person's now-playing state,
+  // broadcast to the room so everyone's bar stays in sync.
+  socket.on('now_playing_update', (data) => {
+    // data: { channelId, title, artist, artworkUrl, isPlaying } or { channelId, title: null } to clear
+    io.to(data.channelId).emit('now_playing_update', data);
+  });
+
+  socket.on('dm_typing', (data) => {
+    // data: { toUserId, fromUsername }
+    io.to(`user:${data.toUserId}`).emit('dm_typing', data);
   });
 
   // Real round-trip latency: client stamps the time, we echo it straight back.
