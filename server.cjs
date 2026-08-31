@@ -426,8 +426,14 @@ app.get('/servers/:id/channels', authMiddleware, requireMembership(), async (req
 app.post('/servers/:id/channels', authMiddleware, requireRole(['owner', 'admin']), async (req, res) => {
   const name = (req.body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Channel name required.' });
+  
   const type = req.body.type === 'text' ? 'text' : 'voice';
-  const channel = await prisma.channel.create({ data: { name, serverId: req.params.id, type } });
+  const isEphemeral = !!req.body.isEphemeral; // 1. Grab it from the request
+  
+  const channel = await prisma.channel.create({ 
+    data: { name, serverId: req.params.id, type, isEphemeral } // 2. Save it to the database
+  });
+  
   res.json(channel);
 });
 
@@ -953,6 +959,12 @@ setInterval(() => {
 
 // --- CHAT: scoped per channel, not global ---
 io.on('connection', (socket) => {
+
+  socket.on('media_action', (data) => {
+  // data: { channelId, type: 'play'|'pause'|'seek'|'enqueue', url, time }
+  // Broadcast to everyone in the room EXCEPT the sender
+  socket.broadcast.to(data.channelId).emit('media_action', data);
+});
   socket.on('join_channel', (channelId) => {
     // leave any previously-joined channel rooms before joining the new one
     [...socket.rooms].forEach((r) => { if (r !== socket.id && !r.startsWith('user:')) socket.leave(r); });
@@ -1057,5 +1069,20 @@ io.on('connection', (socket) => {
     socket.emit('pong_check', sentAt);
   });
 });
+
+setInterval(async () => {
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  try {
+    const deleted = await prisma.message.deleteMany({
+      where: {
+        channel: { isEphemeral: true },
+        createdAt: { lt: yesterday }
+      }
+    });
+    if (deleted.count > 0) console.log(`[Cleanup] Wiped ${deleted.count} ephemeral messages.`);
+  } catch (e) {
+    console.error('[Cleanup Error]', e);
+  }
+}, 60 * 1000); // Check every minute
 
 server.listen(3001, () => console.log('Signaling server running on port 3001'));

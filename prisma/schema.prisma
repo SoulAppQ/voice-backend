@@ -74,16 +74,13 @@ model SoundboardClip {
 }
 
 model Channel {
-  id       String    @id @default(uuid())
-  name     String
-  // "text" | "voice" — text channels never open a LiveKit room; voice
-  // channels behave exactly as every channel used to (voice connects the
-  // instant you open it). Existing rows default to "voice" so nothing that
-  // was already relying on always-on voice silently changes behavior.
-  type     String    @default("voice")
-  serverId String
-  server   Server    @relation(fields: [serverId], references: [id])
-  messages Message[]
+  id          String    @id @default(uuid())
+  name        String
+  type        String    @default("voice")
+  isEphemeral Boolean   @default(false)
+  serverId    String
+  server      Server    @relation(fields: [serverId], references: [id])
+  messages    Message[]
 }
 
 // A persisted text message in a channel. Sender name/avatar are snapshotted
