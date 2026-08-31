@@ -30,6 +30,8 @@ model User {
 
   sentDMs     DirectMessage[] @relation("DMSender")
   receivedDMs DirectMessage[] @relation("DMRecipient")
+
+  addedTracks PlaylistTrack[]
 }
 
 model Server {
@@ -74,20 +76,21 @@ model SoundboardClip {
 }
 
 model Channel {
-  id          String    @id @default(uuid())
-  name        String
-  type        String    @default("voice")
-  isEphemeral Boolean   @default(false)
-  serverId    String
-  server      Server    @relation(fields: [serverId], references: [id])
-  messages    Message[]
+  id             String          @id @default(uuid())
+  name           String
+  type           String          @default("voice")
+  isEphemeral    Boolean         @default(false)
+  serverId       String
+  server         Server          @relation(fields: [serverId], references: [id])
+  messages       Message[]
+  playlistTracks PlaylistTrack[]
 }
 
 // A persisted text message in a channel. Sender name/avatar are snapshotted
 // at send-time so history still renders correctly even if the user later
 // changes their name or avatar.
 model Message {
-  id              String   @id @default(uuid())
+  id              String     @id @default(uuid())
   channelId       String
   senderId        String
   sender          String
@@ -95,11 +98,11 @@ model Message {
   content         String
   attachmentUrl   String?
   attachmentKind  String?
-  pinned          Boolean  @default(false)
+  pinned          Boolean    @default(false)
   editedAt        DateTime?
-  createdAt       DateTime @default(now())
-  channel         Channel  @relation(fields: [channelId], references: [id])
-  user            User     @relation(fields: [senderId], references: [id])
+  createdAt       DateTime   @default(now())
+  channel         Channel    @relation(fields: [channelId], references: [id])
+  user            User       @relation(fields: [senderId], references: [id])
   reactions       Reaction[]
 
   @@index([channelId])
@@ -202,4 +205,20 @@ model UserBadge {
   user      User     @relation(fields: [userId], references: [id])
 
   @@unique([userId, key])
+}
+
+// A saved track for the channel's collaborative playlist
+model PlaylistTrack {
+  id        String   @id @default(uuid())
+  channelId String
+  videoId   String
+  title     String
+  url       String
+  addedById String
+  createdAt DateTime @default(now())
+
+  channel   Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  addedBy   User     @relation(fields: [addedById], references: [id])
+
+  @@index([channelId])
 }

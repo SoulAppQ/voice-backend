@@ -904,6 +904,44 @@ app.delete('/servers/:id/emojis/:emojiId', authMiddleware, requireMembership(), 
   }
 });
 
+// --- PLAYLIST: get, add, remove ---
+app.get('/channels/:id/playlist', authMiddleware, async (req, res) => {
+  try {
+    const tracks = await prisma.playlistTrack.findMany({
+      where: { channelId: req.params.id },
+      orderBy: { createdAt: 'asc' }
+    });
+    res.json(tracks);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch playlist' });
+  }
+});
+
+app.post('/channels/:id/playlist', authMiddleware, async (req, res) => {
+  try {
+    const { videoId, title, url } = req.body;
+    const track = await prisma.playlistTrack.create({
+      data: {
+        channelId: req.params.id,
+        videoId, title, url,
+        addedById: req.user.id
+      }
+    });
+    res.json(track);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to save track' });
+  }
+});
+
+app.delete('/channels/:id/playlist/:trackId', authMiddleware, async (req, res) => {
+  try {
+    await prisma.playlistTrack.delete({ where: { id: req.params.trackId } });
+    res.json({ message: 'Track deleted' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete track' });
+  }
+});
+
 // --- LIVEKIT TOKEN GENERATOR ---
 // Identity now comes from the verified JWT (not a client-supplied query param),
 // and the caller must actually belong to the channel's server.
