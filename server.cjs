@@ -385,7 +385,8 @@ app.get('/servers/:id/channels', authMiddleware, requireMembership(), async (req
 app.post('/servers/:id/channels', authMiddleware, requireRole(['owner', 'admin']), async (req, res) => {
   const name = (req.body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Channel name required.' });
-  const channel = await prisma.channel.create({ data: { name, serverId: req.params.id } });
+  const type = req.body.type === 'text' ? 'text' : 'voice';
+  const channel = await prisma.channel.create({ data: { name, serverId: req.params.id, type } });
   res.json(channel);
 });
 
@@ -806,6 +807,9 @@ app.get('/getToken', authMiddleware, async (req, res) => {
 
   const channel = await prisma.channel.findUnique({ where: { id: channelId } });
   if (!channel) return res.status(404).json({ error: 'Channel not found.' });
+  // Text channels never get a voice token — defense-in-depth in case a
+  // client bug (or a manually-crafted request) tries to join voice on one.
+  if (channel.type === 'text') return res.status(400).json({ error: 'This is a text channel and has no voice room.' });
 
   const membership = await getMembership(req.user.id, channel.serverId);
   if (!membership) return res.status(403).json({ error: 'Not a member of this server.' });
