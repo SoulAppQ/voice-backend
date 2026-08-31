@@ -41,6 +41,25 @@ model Server {
   members         ServerMember[]
   soundboardClips SoundboardClip[]
   invites         Invite[]
+  customEmojis    CustomEmoji[]
+}
+
+// A server-uploaded emoji, either added one at a time or imported as part
+// of a pack. `animated` distinguishes GIF/WEBP uploads so the picker and
+// message renderer know to treat them as animated rather than static.
+model CustomEmoji {
+  id         String   @id @default(uuid())
+  serverId   String
+  name       String
+  url        String
+  animated   Boolean  @default(false)
+  uploaderId String
+  createdAt  DateTime @default(now())
+  server     Server   @relation(fields: [serverId], references: [id])
+
+  // Names are unique per-server so ":partyparrot:" always resolves to one
+  // emoji within a given server, the same way Discord scopes custom emoji.
+  @@unique([serverId, name])
 }
 
 // A short MP3 clip a member uploaded for instant playback in this server's voice channels.
@@ -84,8 +103,26 @@ model Message {
   createdAt       DateTime @default(now())
   channel         Channel  @relation(fields: [channelId], references: [id])
   user            User     @relation(fields: [senderId], references: [id])
+  reactions       Reaction[]
 
   @@index([channelId])
+}
+
+// A single emoji reaction from one user on one message. One row per
+// (message, user, emoji) triple — a user can react with several different
+// emoji on the same message, but can't stack the same one twice; toggling
+// the same emoji again removes it.
+model Reaction {
+  id        String   @id @default(uuid())
+  messageId String
+  userId    String
+  username  String
+  emoji     String
+  createdAt DateTime @default(now())
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId, emoji])
+  @@index([messageId])
 }
 
 // Join table: who belongs to which server, and with what role.

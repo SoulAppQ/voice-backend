@@ -94,6 +94,22 @@ const soundboardUpload = multer({
   },
 });
 
+// ---- CUSTOM EMOJI UPLOADS --------------------------------------------------
+// Small, image-only uploads (PNG/JPEG for static, GIF/WEBP for animated).
+// `animated` on the CustomEmoji row is set from the file's mimetype below,
+// not something the client can lie about.
+const EMOJI_MIME = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+const MAX_EMOJI_BYTES = 512 * 1024; // 512KB — emoji should be small, not full images
+
+const emojiUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_EMOJI_BYTES },
+  fileFilter: (req, file, cb) => {
+    if (!EMOJI_MIME.has(file.mimetype)) return cb(new Error('Emoji must be a PNG, JPEG, GIF, or WEBP image.'));
+    cb(null, true);
+  },
+});
+
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
@@ -175,6 +191,10 @@ function attachmentFromMessage(m) {
   return m.attachmentUrl ? { url: m.attachmentUrl, kind: m.attachmentKind || 'image' } : null;
 }
 
+function serializeReaction(r) {
+  return { emoji: r.emoji, userId: r.userId, username: r.username };
+}
+
 function serializeMessage(m) {
   return {
     id: m.id,
@@ -187,6 +207,7 @@ function serializeMessage(m) {
     pinned: m.pinned,
     editedAt: m.editedAt,
     createdAt: m.createdAt,
+    reactions: (m.reactions || []).map(serializeReaction),
   };
 }
 
@@ -511,6 +532,7 @@ app.get('/servers/:id/channels/:channelId/messages', authMiddleware, requireMemb
       },
       orderBy: { createdAt: 'desc' },
       take: limit,
+      include: { reactions: true },
     });
     // If we got a full page, there may be more/older messages beyond it.
     res.json({ messages: messages.reverse().map(serializeMessage), hasMore: messages.length === limit });
@@ -525,6 +547,7 @@ app.get('/servers/:id/channels/:channelId/pinned', authMiddleware, requireMember
     const pinned = await prisma.message.findMany({
       where: { channelId: req.params.channelId, pinned: true },
       orderBy: { createdAt: 'asc' },
+      include: { reactions: true },
     });
     res.json(pinned.map(serializeMessage));
   } catch (err) {
@@ -818,6 +841,63 @@ app.delete('/servers/:id/soundboard/:clipId', authMiddleware, requireMembership(
   }
 });
 
+// --- CUSTOM EMOJI: list a server's pack ---
+app.get('/servers/:id/emojis', authMiddleware, requireMembership(), async (req, res) => {
+  try {
+    const emojis = await prisma.customEmoji.findMany({
+      where: { serverId: req.params.id },
+      orderBy: { createdAt: 'asc' },
+    });
+    res.json(emojis);
+  } catch (error) {
+    console.error('GET /emojis failed:', error);
+    res.status(500).json({ error: 'Could not load this server\'s emoji. Has the database migration been run?' });
+  }
+});
+
+// --- CUSTOM EMOJI: add one (any member, name must be unique per-server) ---
+// This is also the entry point for "importing a pack" from the client:
+// the picker's pack-import flow just calls this once per emoji in the pack.
+app.post('/servers/:id/emojis', authMiddleware, requireMembership(), (req, res) => {
+  emojiUpload.single('file')(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message || 'Upload failed.' });
+    if (!req.file) return res.status(400).json({ error: 'No file provided.' });
+    const name = (req.body.name || '').trim().toLowerCase().replace(/[^a-z0-9_+-]/g, '');
+    if (!name) return res.status(400).json({ error: 'Emoji needs a name using only letters, numbers, _ or -.' });
+    if (name.length > 32) return res.status(400).json({ error: 'Emoji name is too long.' });
+    const animated = req.file.mimetype === 'image/gif' || req.file.mimetype === 'image/webp';
+    try {
+      const result = await uploadBufferToCloudinary(req.file.buffer, { folder: 'soul/emojis', resourceType: 'image' });
+      const emoji = await prisma.customEmoji.create({
+        data: { name, url: result.secure_url, animated, serverId: req.params.id, uploaderId: req.user.id },
+      });
+      res.json(emoji);
+    } catch (error) {
+      if (error.code === 'P2002') return res.status(409).json({ error: `:${name}: is already taken in this server.` });
+      console.error('Emoji upload failed:', error);
+      res.status(500).json({ error: 'Could not save the emoji. Has the database migration been run?' });
+    }
+  });
+});
+
+// --- CUSTOM EMOJI: remove one (uploader, or owner/admin) ---
+app.delete('/servers/:id/emojis/:emojiId', authMiddleware, requireMembership(), async (req, res) => {
+  try {
+    const emoji = await prisma.customEmoji.findUnique({ where: { id: req.params.emojiId } });
+    if (!emoji || emoji.serverId !== req.params.id) return res.status(404).json({ error: 'Emoji not found.' });
+
+    const isUploader = emoji.uploaderId === req.user.id;
+    const isManager = ['owner', 'admin'].includes(req.membership.role);
+    if (!isUploader && !isManager) return res.status(403).json({ error: 'Insufficient permissions.' });
+
+    await prisma.customEmoji.delete({ where: { id: emoji.id } });
+    res.json({ message: 'Emoji deleted.' });
+  } catch (error) {
+    console.error('DELETE /emojis failed:', error);
+    res.status(500).json({ error: 'Could not delete the emoji.' });
+  }
+});
+
 // --- LIVEKIT TOKEN GENERATOR ---
 // Identity now comes from the verified JWT (not a client-supplied query param),
 // and the caller must actually belong to the channel's server.
@@ -924,6 +1004,34 @@ io.on('connection', (socket) => {
 
   socket.on('typing', (data) => {
     socket.broadcast.to(data.channelId).emit('typing', data);
+  });
+
+  // Reactions toggle: if this user already reacted with this emoji on this
+  // message, remove it; otherwise add it. Broadcasts a small delta (not the
+  // full message) so every client in the room can update in place.
+  socket.on('toggle_reaction', async (data) => {
+    // data: { channelId, messageId, userId, username, emoji }
+    if (!data?.channelId || !data?.messageId || !data?.userId || !data?.emoji) return;
+    try {
+      const existing = await prisma.reaction.findUnique({
+        where: { messageId_userId_emoji: { messageId: data.messageId, userId: data.userId, emoji: data.emoji } },
+      });
+      if (existing) {
+        await prisma.reaction.delete({ where: { id: existing.id } });
+        io.to(data.channelId).emit('reaction_updated', {
+          messageId: data.messageId, emoji: data.emoji, userId: data.userId, username: data.username, added: false,
+        });
+      } else {
+        await prisma.reaction.create({
+          data: { messageId: data.messageId, userId: data.userId, username: data.username || 'Someone', emoji: data.emoji },
+        });
+        io.to(data.channelId).emit('reaction_updated', {
+          messageId: data.messageId, emoji: data.emoji, userId: data.userId, username: data.username, added: true,
+        });
+      }
+    } catch (err) {
+      console.error('toggle_reaction failed:', err);
+    }
   });
 
   socket.on('play_soundboard', (data) => {
