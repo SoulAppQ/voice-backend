@@ -132,6 +132,13 @@ function requireMembership() {
   };
 }
 
+// REVIEW: permissions are three hardcoded tiers (owner/admin/member) baked
+// directly into requireRole() calls throughout this file — no granular or
+// custom roles. Fine for a small friend server, but it'll feel limiting the
+// moment someone wants e.g. a "can moderate messages but not delete the
+// server / manage channels" role. A real fix means moving from a fixed enum
+// to a permission-bits or named-permissions model (per role or per member
+// override), which touches every requireRole(['owner','admin']) call site.
 function requireRole(roles) {
   return async (req, res, next) => {
     const membership = await getMembership(req.user.id, req.params.id);
