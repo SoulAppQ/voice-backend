@@ -724,7 +724,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('send_message', async (data) => {
-    // data: { channelId, sender, senderId, message, attachment?, senderAvatarUrl? }
+    // data: { channelId, sender, senderId, message, attachment?, senderAvatarUrl?, clientId? }
     try {
       const saved = await prisma.message.create({
         data: {
@@ -737,12 +737,15 @@ io.on('connection', (socket) => {
           attachmentKind: data.attachment?.kind || null,
         },
       });
-      io.to(data.channelId).emit('receive_message', serializeMessage(saved));
+      // clientId lets the sender's own UI reconcile its optimistic message
+      // with the persisted one instead of showing a duplicate.
+      io.to(data.channelId).emit('receive_message', { ...serializeMessage(saved), clientId: data.clientId });
     } catch (err) {
       console.error('send_message persist failed:', err);
       // Fall back to a non-persisted broadcast so the room isn't dead in the water
-      // even if the DB migration hasn't been run yet.
-      socket.broadcast.to(data.channelId).emit('receive_message', { ...data, id: crypto.randomUUID() });
+      // even if the DB migration hasn't been run yet. Use io.to (not
+      // socket.broadcast.to) so the sender still sees their own message.
+      io.to(data.channelId).emit('receive_message', { ...data, id: crypto.randomUUID() });
     }
   });
 
