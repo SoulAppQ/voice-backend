@@ -100,15 +100,30 @@ const io = new Server(server, { cors: { origin: "*" } });
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-key-for-now';
 
 // ---- AUTH HELPERS --------------------------------------------------------
-function authMiddleware(req, res, next) {
+// Verifies the JWT signature AND that the user it points to still exists in
+// this database. Without the existence check, a stale token (e.g. left over
+// after the DB was reset/re-provisioned, or after the account was deleted)
+// still passes auth, then blows up downstream as a raw foreign-key
+// violation the first time a route does prisma.<model>.create() with
+// req.user.id — instead of a clean 401 telling the client to log in again.
+async function authMiddleware(req, res, next) {
   const header = req.headers.authorization;
   if (!header) return res.status(401).json({ error: 'Missing token' });
+  let decoded;
   try {
-    req.user = jwt.verify(header.replace('Bearer ', ''), JWT_SECRET); // { id, username }
-    next();
+    decoded = jwt.verify(header.replace('Bearer ', ''), JWT_SECRET); // { id, username }
   } catch {
-    res.status(401).json({ error: 'Invalid or expired token' });
+    return res.status(401).json({ error: 'Invalid or expired token' });
   }
+  try {
+    const exists = await prisma.user.findUnique({ where: { id: decoded.id }, select: { id: true } });
+    if (!exists) return res.status(401).json({ error: 'Account no longer exists. Please log in again.' });
+  } catch (e) {
+    console.error('Auth existence check failed:', e);
+    return res.status(500).json({ error: 'Authentication check failed.' });
+  }
+  req.user = decoded;
+  next();
 }
 
 function optionalAuth(req, res, next) {
@@ -322,16 +337,21 @@ app.post('/servers', authMiddleware, async (req, res) => {
 // --- SERVERS: join / leave ---
 app.post('/servers/:id/join', authMiddleware, async (req, res) => {
   const serverId = req.params.id;
-  const existing = await getMembership(req.user.id, serverId);
-  if (existing) return res.json(existing);
+  try {
+    const existing = await getMembership(req.user.id, serverId);
+    if (existing) return res.json(existing);
 
-  const serverExists = await prisma.server.findUnique({ where: { id: serverId } });
-  if (!serverExists) return res.status(404).json({ error: 'Server not found.' });
+    const serverExists = await prisma.server.findUnique({ where: { id: serverId } });
+    if (!serverExists) return res.status(404).json({ error: 'Server not found.' });
 
-  const member = await prisma.serverMember.create({
-    data: { userId: req.user.id, serverId, role: 'member' },
-  });
-  res.json(member);
+    const member = await prisma.serverMember.create({
+      data: { userId: req.user.id, serverId, role: 'member' },
+    });
+    res.json(member);
+  } catch (e) {
+    console.error('Join server failed:', e);
+    res.status(500).json({ error: 'Could not join server. Please try again.' });
+  }
 });
 
 app.post('/servers/:id/leave', authMiddleware, async (req, res) => {
