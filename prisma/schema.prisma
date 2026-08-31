@@ -75,6 +75,7 @@ model Message {
   attachmentUrl   String?
   attachmentKind  String?
   pinned          Boolean  @default(false)
+  editedAt        DateTime?
   createdAt       DateTime @default(now())
   channel         Channel  @relation(fields: [channelId], references: [id])
   user            User     @relation(fields: [senderId], references: [id])

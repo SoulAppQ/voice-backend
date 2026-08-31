@@ -134,6 +134,7 @@ function serializeMessage(m) {
     content: m.content,
     attachment: attachmentFromMessage(m),
     pinned: m.pinned,
+    editedAt: m.editedAt,
     createdAt: m.createdAt,
   };
 }
@@ -419,18 +420,28 @@ app.post(
   }
 );
 
-// --- MESSAGES: channel history + pinning -----------------------------------
+// --- MESSAGES: channel history (paginated) + pinning ------------------------
+// Defaults to the latest 50 messages. Pass ?before=<ISO timestamp> (the
+// createdAt of the oldest message currently loaded) to page further back —
+// this is what powers "load more" when scrolling up through history.
 app.get('/servers/:id/channels/:channelId/messages', authMiddleware, requireMembership(), async (req, res) => {
   try {
     const channel = await prisma.channel.findUnique({ where: { id: req.params.channelId } });
     if (!channel || channel.serverId !== req.params.id) return res.status(404).json({ error: 'Room not found.' });
-    const limit = Math.min(parseInt(req.query.limit, 10) || 100, 200);
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
+    const before = req.query.before ? new Date(req.query.before) : null;
+    const hasValidCursor = before && !isNaN(before.getTime());
+
     const messages = await prisma.message.findMany({
-      where: { channelId: req.params.channelId },
+      where: {
+        channelId: req.params.channelId,
+        ...(hasValidCursor ? { createdAt: { lt: before } } : {}),
+      },
       orderBy: { createdAt: 'desc' },
       take: limit,
     });
-    res.json(messages.reverse().map(serializeMessage));
+    // If we got a full page, there may be more/older messages beyond it.
+    res.json({ messages: messages.reverse().map(serializeMessage), hasMore: messages.length === limit });
   } catch (err) {
     console.error('GET messages failed:', err);
     res.status(500).json({ error: 'Could not load message history. Has the database migration been run?' });
@@ -468,6 +479,49 @@ app.delete('/servers/:id/channels/:channelId/messages/:messageId/pin', authMiddl
     res.json({ id: msg.id });
   } catch (err) {
     res.status(404).json({ error: 'Message not found.' });
+  }
+});
+
+// --- MESSAGES: edit (sender only) -------------------------------------------
+app.patch('/servers/:id/channels/:channelId/messages/:messageId', authMiddleware, requireMembership(), async (req, res) => {
+  try {
+    const content = (req.body.content || '').trim();
+    if (!content) return res.status(400).json({ error: 'Message cannot be empty.' });
+    if (content.length > 4000) return res.status(400).json({ error: 'Message is too long.' });
+
+    const msg = await prisma.message.findUnique({ where: { id: req.params.messageId } });
+    if (!msg || msg.channelId !== req.params.channelId) return res.status(404).json({ error: 'Message not found.' });
+    if (msg.senderId !== req.user.id) return res.status(403).json({ error: 'You can only edit your own messages.' });
+
+    const updated = await prisma.message.update({
+      where: { id: msg.id },
+      data: { content, editedAt: new Date() },
+    });
+    const payload = serializeMessage(updated);
+    io.to(req.params.channelId).emit('message_edited', payload);
+    res.json(payload);
+  } catch (err) {
+    console.error('PATCH message failed:', err);
+    res.status(500).json({ error: 'Could not edit message.' });
+  }
+});
+
+// --- MESSAGES: delete (sender, or owner/admin) ------------------------------
+app.delete('/servers/:id/channels/:channelId/messages/:messageId', authMiddleware, requireMembership(), async (req, res) => {
+  try {
+    const msg = await prisma.message.findUnique({ where: { id: req.params.messageId } });
+    if (!msg || msg.channelId !== req.params.channelId) return res.status(404).json({ error: 'Message not found.' });
+
+    const isSender = msg.senderId === req.user.id;
+    const isManager = ['owner', 'admin'].includes(req.membership.role);
+    if (!isSender && !isManager) return res.status(403).json({ error: 'Insufficient permissions.' });
+
+    await prisma.message.delete({ where: { id: msg.id } });
+    io.to(req.params.channelId).emit('message_deleted', { id: msg.id, channelId: req.params.channelId });
+    res.json({ id: msg.id });
+  } catch (err) {
+    console.error('DELETE message failed:', err);
+    res.status(500).json({ error: 'Could not delete message.' });
   }
 });
 
@@ -709,6 +763,34 @@ app.get('/getToken', authMiddleware, async (req, res) => {
   res.send({ token: await at.toJwt() });
 });
 
+// --- RATE LIMITING: cap how fast one sender can post messages --------------
+// Simple in-memory sliding window per userId. Fine for a single-process
+// deployment; would need a shared store (e.g. Redis) if this ever runs
+// behind multiple server instances.
+const RATE_LIMIT_WINDOW_MS = 5000;
+const RATE_LIMIT_MAX_MESSAGES = 8; // ~1.6 msgs/sec sustained before throttling
+const sendTimestamps = new Map(); // userId -> array of send times (ms)
+
+function isRateLimited(userId) {
+  const now = Date.now();
+  const recent = (sendTimestamps.get(userId) || []).filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
+  const limited = recent.length >= RATE_LIMIT_MAX_MESSAGES;
+  if (!limited) recent.push(now);
+  sendTimestamps.set(userId, recent);
+  return limited;
+}
+
+// Periodically drop tracking for users who've been quiet, so this map
+// doesn't grow forever across a long-running process.
+setInterval(() => {
+  const now = Date.now();
+  for (const [userId, times] of sendTimestamps) {
+    const recent = times.filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
+    if (recent.length === 0) sendTimestamps.delete(userId);
+    else sendTimestamps.set(userId, recent);
+  }
+}, 60 * 1000);
+
 // --- CHAT: scoped per channel, not global ---
 io.on('connection', (socket) => {
   socket.on('join_channel', (channelId) => {
@@ -725,6 +807,17 @@ io.on('connection', (socket) => {
 
   socket.on('send_message', async (data) => {
     // data: { channelId, sender, senderId, message, attachment?, senderAvatarUrl?, clientId? }
+    if (!data?.channelId || !data?.senderId) return;
+
+    if (isRateLimited(data.senderId)) {
+      socket.emit('rate_limited', {
+        channelId: data.channelId,
+        clientId: data.clientId,
+        message: "You're sending messages too fast. Slow down a bit and try again.",
+      });
+      return;
+    }
+
     try {
       const saved = await prisma.message.create({
         data: {
