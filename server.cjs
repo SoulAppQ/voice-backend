@@ -10,6 +10,7 @@ const { AccessToken } = require('livekit-server-sdk');
 const { PrismaClient } = require('@prisma/client');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const { v2: cloudinary } = require('cloudinary');
 
 const prisma = new PrismaClient();
 const app = express();
@@ -22,10 +23,45 @@ process.on('unhandledRejection', (reason) => {
   console.error('Unhandled promise rejection (server stayed up):', reason);
 });
 
-// ---- CLIP/SCREENSHOT UPLOADS ---------------------------------------------
-const UPLOAD_DIR = path.join(__dirname, 'uploads');
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR);
-app.use('/uploads', express.static(UPLOAD_DIR));
+// ---- FILE UPLOADS (Cloudinary) --------------------------------------------
+// IMPORTANT: uploads used to be written to local disk (`uploads/` next to this
+// file) and served via express.static. That works fine on a machine that
+// never restarts, but Render's web services have an EPHEMERAL filesystem —
+// every redeploy, restart, or free-tier spin-down after inactivity wipes
+// anything written at runtime. That's why avatars, chat attachments, and
+// soundboard clips would vanish after a few minutes or a restart. Files now
+// go to Cloudinary instead, so they persist independently of the server
+// process/container.
+//
+// Requires these env vars to be set on Render (Dashboard -> your service ->
+// Environment): CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET
+// (find them on your Cloudinary dashboard after creating a free account).
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
+  console.warn(
+    'WARNING: Cloudinary env vars are not fully set (CLOUDINARY_CLOUD_NAME / CLOUDINARY_API_KEY / CLOUDINARY_API_SECRET). ' +
+    'File uploads (avatars, attachments, soundboard clips) will fail until these are configured.'
+  );
+}
+
+// Streams a buffer up to Cloudinary and resolves with the upload result
+// (we mainly care about `.secure_url`). `resourceType` is 'image' for
+// avatars/banners/screenshots, 'video' for clips, 'video' for mp3s too
+// (Cloudinary files raw audio under its "video" resource type).
+function uploadBufferToCloudinary(buffer, { folder, resourceType = 'image', publicId }) {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { folder, resource_type: resourceType, public_id: publicId },
+      (err, result) => (err ? reject(err) : resolve(result))
+    );
+    stream.end(buffer);
+  });
+}
 
 const ALLOWED_MIME = new Set([
   'image/png', 'image/jpeg', 'image/gif', 'image/webp',
@@ -33,14 +69,10 @@ const ALLOWED_MIME = new Set([
 ]);
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50MB, plenty for a short clip
 
+// Memory storage: the file just passes through as a buffer on its way to
+// Cloudinary — it's never written to this server's disk.
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-    filename: (req, file, cb) => {
-      const ext = path.extname(file.originalname).slice(0, 10);
-      cb(null, `${crypto.randomUUID()}${ext}`);
-    },
-  }),
+  storage: multer.memoryStorage(),
   limits: { fileSize: MAX_UPLOAD_BYTES },
   fileFilter: (req, file, cb) => {
     if (!ALLOWED_MIME.has(file.mimetype)) return cb(new Error('Unsupported file type.'));
@@ -54,10 +86,7 @@ const SOUNDBOARD_MIME = new Set(['audio/mpeg', 'audio/mp3']);
 const MAX_SOUNDBOARD_BYTES = 2 * 1024 * 1024; // 2MB — soundboard clips should be short
 
 const soundboardUpload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-    filename: (req, file, cb) => cb(null, `${crypto.randomUUID()}.mp3`),
-  }),
+  storage: multer.memoryStorage(),
   limits: { fileSize: MAX_SOUNDBOARD_BYTES },
   fileFilter: (req, file, cb) => {
     if (!SOUNDBOARD_MIME.has(file.mimetype)) return cb(new Error('Only MP3 clips are supported.'));
@@ -310,10 +339,19 @@ app.post('/servers/:id/leave', authMiddleware, async (req, res) => {
 
 // --- PROFILE UPLOADS: avatar/banner images or GIFs, any logged-in user ---
 app.post('/profile/upload', authMiddleware, (req, res) => {
-  upload.single('file')(req, res, (err) => {
+  upload.single('file')(req, res, async (err) => {
     if (err) return res.status(400).json({ error: err.message || 'Upload failed.' });
     if (!req.file) return res.status(400).json({ error: 'No file provided.' });
-    res.json({ url: `/uploads/${req.file.filename}`, mimeType: req.file.mimetype });
+    try {
+      const result = await uploadBufferToCloudinary(req.file.buffer, {
+        folder: 'soul/profile',
+        resourceType: 'image',
+      });
+      res.json({ url: result.secure_url, mimeType: req.file.mimetype });
+    } catch (error) {
+      console.error('Profile upload to Cloudinary failed:', error);
+      res.status(500).json({ error: 'Upload failed. Please try again.' });
+    }
   });
 });
 
@@ -408,14 +446,20 @@ app.post(
   authMiddleware,
   requireMembership(),
   (req, res) => {
-    upload.single('file')(req, res, (err) => {
+    upload.single('file')(req, res, async (err) => {
       if (err) return res.status(400).json({ error: err.message || 'Upload failed.' });
       if (!req.file) return res.status(400).json({ error: 'No file provided.' });
-      res.json({
-        url: `/uploads/${req.file.filename}`,
-        mimeType: req.file.mimetype,
-        kind: req.file.mimetype.startsWith('video/') ? 'video' : 'image',
-      });
+      const kind = req.file.mimetype.startsWith('video/') ? 'video' : 'image';
+      try {
+        const result = await uploadBufferToCloudinary(req.file.buffer, {
+          folder: 'soul/attachments',
+          resourceType: kind, // 'video' or 'image'
+        });
+        res.json({ url: result.secure_url, mimeType: req.file.mimetype, kind });
+      } catch (error) {
+        console.error('Attachment upload to Cloudinary failed:', error);
+        res.status(500).json({ error: 'Upload failed. Please try again.' });
+      }
     });
   }
 );
@@ -712,8 +756,13 @@ app.post('/servers/:id/soundboard', authMiddleware, requireMembership(), (req, r
     if (!req.file) return res.status(400).json({ error: 'No file provided.' });
     const name = (req.body.name || req.file.originalname || 'clip').trim().slice(0, 40);
     try {
+      // Cloudinary treats audio as a 'video' resource type.
+      const result = await uploadBufferToCloudinary(req.file.buffer, {
+        folder: 'soul/soundboard',
+        resourceType: 'video',
+      });
       const clip = await prisma.soundboardClip.create({
-        data: { name, url: `/uploads/${req.file.filename}`, serverId: req.params.id, uploaderId: req.user.id },
+        data: { name, url: result.secure_url, serverId: req.params.id, uploaderId: req.user.id },
       });
       res.json(clip);
     } catch (error) {
