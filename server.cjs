@@ -998,6 +998,11 @@ setInterval(() => {
 // --- CHAT: scoped per channel, not global ---
 io.on('connection', (socket) => {
 
+  socket.on('user_volume_update', (data) => {
+    // Broadcast the new volume to everyone else in the channel
+    socket.broadcast.to(data.channelId).emit('user_volume_update', data);
+  });
+
   socket.on('telestrator_draw', (data) => {
     // Broadcast drawing coordinates to everyone else in the room
     socket.broadcast.to(data.channelId).emit('telestrator_draw', data);
