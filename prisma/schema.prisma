@@ -31,7 +31,8 @@ model User {
   sentDMs     DirectMessage[] @relation("DMSender")
   receivedDMs DirectMessage[] @relation("DMRecipient")
 
-  addedTracks PlaylistTrack[]
+  addedTracks   PlaylistTrack[]
+  mixerPresets  MixerPreset[]
 }
 
 model Server {
@@ -207,7 +208,6 @@ model UserBadge {
   @@unique([userId, key])
 }
 
-// A saved track for the channel's collaborative playlist
 model PlaylistTrack {
   id        String   @id @default(uuid())
   channelId String
@@ -221,4 +221,21 @@ model PlaylistTrack {
   addedBy   User     @relation(fields: [addedById], references: [id])
 
   @@index([channelId])
+}
+
+// One row per (listener, target) pair — how `ownerId` personally likes to
+// hear `targetIdentity`. Synced across devices, unlike the local mixer state.
+model MixerPreset {
+  id             String   @id @default(uuid())
+  ownerId        String
+  targetIdentity String
+  voice          Float    @default(1)
+  stream         Float    @default(1)
+  bassCut        Int      @default(90)
+  trebleCut      Int      @default(8000)
+  pan            Float    @default(0)
+  updatedAt      DateTime @updatedAt
+  owner          User     @relation(fields: [ownerId], references: [id])
+
+  @@unique([ownerId, targetIdentity])
 }

@@ -942,6 +942,30 @@ app.delete('/channels/:id/playlist/:trackId', authMiddleware, async (req, res) =
   }
 });
 
+// --- MIXER PRESETS: how I personally like to hear each person, synced across devices ---
+app.get('/mixer-presets', authMiddleware, async (req, res) => {
+  try {
+    const presets = await prisma.mixerPreset.findMany({ where: { ownerId: req.user.id } });
+    res.json(presets);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch mixer presets' });
+  }
+});
+
+app.put('/mixer-presets/:targetIdentity', authMiddleware, async (req, res) => {
+  try {
+    const { voice, stream, bassCut, trebleCut, pan } = req.body;
+    const preset = await prisma.mixerPreset.upsert({
+      where: { ownerId_targetIdentity: { ownerId: req.user.id, targetIdentity: req.params.targetIdentity } },
+      update: { voice, stream, bassCut, trebleCut, pan },
+      create: { ownerId: req.user.id, targetIdentity: req.params.targetIdentity, voice, stream, bassCut, trebleCut, pan }
+    });
+    res.json(preset);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to save mixer preset' });
+  }
+});
+
 // --- LIVEKIT TOKEN GENERATOR ---
 // Identity now comes from the verified JWT (not a client-supplied query param),
 // and the caller must actually belong to the channel's server.
