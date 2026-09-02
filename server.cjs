@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const multer = require('multer');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const rateLimit = require('express-rate-limit');
 const { AccessToken } = require('livekit-server-sdk');
 const { PrismaClient } = require('@prisma/client');
 const bcrypt = require('bcrypt');
@@ -14,8 +15,30 @@ const { v2: cloudinary } = require('cloudinary');
 
 const prisma = new PrismaClient();
 const app = express();
-app.use(cors());
+
+const allowedOrigins = ['http://localhost:5173', 'file://', 'null']; 
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  }
+}));
 app.use(express.json());
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 mins
+  max: 20, 
+  message: { error: 'Too many attempts, please try again later.' }
+});
+
+const uploadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 50,
+  message: { error: 'Upload limit reached. Please try again later.' }
+});
 
 // Safety net: an uncaught error in any route (ours or a future one) should
 // log and keep the process alive, not take down every other endpoint.
@@ -111,7 +134,17 @@ const emojiUpload = multer({
 });
 
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+const io = new Server(server, { 
+  cors: { 
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
+    } 
+  } 
+});
 
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-key-for-now';
 
@@ -228,7 +261,7 @@ async function initDefaultServer() {
 initDefaultServer();
 
 // --- SECURE REGISTRATION ---
-app.post('/register', async (req, res) => {
+app.post('/register', authLimiter, async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Username and password required.' });
   try {
@@ -248,7 +281,7 @@ app.post('/register', async (req, res) => {
 });
 
 // --- SECURE LOGIN ---
-app.post('/login', async (req, res) => {
+app.post('/login', authLimiter, async (req, res) => {
   try {
     const { username, password } = req.body;
     const user = await prisma.user.findUnique({ where: { username } });
@@ -386,7 +419,7 @@ app.post('/servers/:id/leave', authMiddleware, async (req, res) => {
 });
 
 // --- PROFILE UPLOADS: avatar/banner images or GIFs, any logged-in user ---
-app.post('/profile/upload', authMiddleware, (req, res) => {
+app.post('/profile/upload', authMiddleware, uploadLimiter, (req, res) => {
   upload.single('file')(req, res, async (err) => {
     if (err) return res.status(400).json({ error: err.message || 'Upload failed.' });
     if (!req.file) return res.status(400).json({ error: 'No file provided.' });
@@ -500,6 +533,7 @@ app.post(
   '/servers/:id/upload',
   authMiddleware,
   requireMembership(),
+  uploadLimiter,
   (req, res) => {
     upload.single('file')(req, res, async (err) => {
       if (err) return res.status(400).json({ error: err.message || 'Upload failed.' });
@@ -905,7 +939,15 @@ app.delete('/servers/:id/emojis/:emojiId', authMiddleware, requireMembership(), 
 });
 
 // --- PLAYLIST: get, add, remove ---
-app.get('/channels/:id/playlist', authMiddleware, async (req, res) => {
+async function requireChannelMembership(req, res, next) {
+  const channel = await prisma.channel.findUnique({ where: { id: req.params.id } });
+  if (!channel) return res.status(404).json({ error: 'Room not found.' });
+  const membership = await getMembership(req.user.id, channel.serverId);
+  if (!membership) return res.status(403).json({ error: 'Not a member of this server.' });
+  next();
+}
+
+app.get('/channels/:id/playlist', authMiddleware, requireChannelMembership, async (req, res) => {
   try {
     const tracks = await prisma.playlistTrack.findMany({
       where: { channelId: req.params.id },
@@ -917,7 +959,7 @@ app.get('/channels/:id/playlist', authMiddleware, async (req, res) => {
   }
 });
 
-app.post('/channels/:id/playlist', authMiddleware, async (req, res) => {
+app.post('/channels/:id/playlist', authMiddleware, requireChannelMembership, async (req, res) => {
   try {
     const { videoId, title, url } = req.body;
     const track = await prisma.playlistTrack.create({
@@ -933,7 +975,7 @@ app.post('/channels/:id/playlist', authMiddleware, async (req, res) => {
   }
 });
 
-app.delete('/channels/:id/playlist/:trackId', authMiddleware, async (req, res) => {
+app.delete('/channels/:id/playlist/:trackId', authMiddleware, requireChannelMembership, async (req, res) => {
   try {
     await prisma.playlistTrack.delete({ where: { id: req.params.trackId } });
     res.json({ message: 'Track deleted' });
