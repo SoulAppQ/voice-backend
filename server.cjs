@@ -1079,6 +1079,19 @@ io.on('connection', (socket) => {
   // Broadcast to everyone in the room EXCEPT the sender
   socket.broadcast.to(data.channelId).emit('media_action', data);
 });
+
+  socket.on('room_command', (data) => {
+    socket.broadcast.to(data.channelId).emit('room_command', data);
+  });
+
+  socket.on('spatial_move', (data) => {
+    socket.broadcast.to(data.channelId).emit('spatial_move', data);
+  });
+
+  socket.on('timer_update', (data) => {
+    socket.broadcast.to(data.channelId).emit('timer_update', data);
+  });
+
   socket.on('join_channel', (channelId) => {
     // leave any previously-joined channel rooms before joining the new one
     [...socket.rooms].forEach((r) => { if (r !== socket.id && !r.startsWith('user:')) socket.leave(r); });
