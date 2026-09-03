@@ -33,6 +33,7 @@ model User {
 
   addedTracks   PlaylistTrack[]
   mixerPresets  MixerPreset[]
+  namedPresets  NamedMixerPreset[]
 }
 
 model Server {
@@ -238,4 +239,15 @@ model MixerPreset {
   owner          User     @relation(fields: [ownerId], references: [id])
 
   @@unique([ownerId, targetIdentity])
+}
+
+model NamedMixerPreset {
+  id          String   @id @default(uuid())
+  ownerId     String
+  name        String
+  presetData  String   // JSON string of { mixerOverrides, roomPositions }
+  createdAt   DateTime @default(now())
+  owner       User     @relation(fields: [ownerId], references: [id])
+
+  @@unique([ownerId, name])
 }

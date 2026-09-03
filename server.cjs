@@ -1008,6 +1008,35 @@ app.put('/mixer-presets/:targetIdentity', authMiddleware, async (req, res) => {
   }
 });
 
+// --- NAMED PRESETS: sync full mixer + spatial setups across devices ---
+app.get('/named-presets', authMiddleware, async (req, res) => {
+  try {
+    const presets = await prisma.namedMixerPreset.findMany({ where: { ownerId: req.user.id } });
+    const formatted = {};
+    presets.forEach((p) => {
+      try { formatted[p.name] = JSON.parse(p.presetData); } catch (e) {}
+    });
+    res.json(formatted);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch named presets' });
+  }
+});
+
+app.put('/named-presets/:name', authMiddleware, async (req, res) => {
+  try {
+    const { mixerOverrides, roomPositions } = req.body;
+    const presetData = JSON.stringify({ mixerOverrides: mixerOverrides || {}, roomPositions: roomPositions || {} });
+    await prisma.namedMixerPreset.upsert({
+      where: { ownerId_name: { ownerId: req.user.id, name: req.params.name } },
+      update: { presetData },
+      create: { ownerId: req.user.id, name: req.params.name, presetData }
+    });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to save named preset' });
+  }
+});
+
 // --- LIVEKIT TOKEN GENERATOR ---
 // Identity now comes from the verified JWT (not a client-supplied query param),
 // and the caller must actually belong to the channel's server.
@@ -1103,6 +1132,11 @@ io.on('connection', (socket) => {
 
   socket.on('spatial_move', (data) => {
     socket.broadcast.to(data.channelId).emit('spatial_move', data);
+  });
+
+  socket.on('room_atmosphere_update', (data) => {
+    // data: { channelId, roomReverb }
+    socket.broadcast.to(data.channelId).emit('room_atmosphere_update', data);
   });
 
   socket.on('timer_update', (data) => {
