@@ -1061,8 +1061,25 @@ setInterval(() => {
   }
 }, 60 * 1000);
 
+const globalPresence = new Map();
+
 // --- CHAT: scoped per channel, not global ---
 io.on('connection', (socket) => {
+
+  socket.on('disconnect', () => {
+    if (socket.userId) {
+      const p = globalPresence.get(socket.userId) || {};
+      globalPresence.set(socket.userId, { ...p, online: false });
+      io.emit('presence_sync', Object.fromEntries(globalPresence));
+    }
+  });
+
+  socket.on('set_presence', (data) => {
+    if (!socket.userId) return;
+    const p = globalPresence.get(socket.userId) || {};
+    globalPresence.set(socket.userId, { ...p, ...data, online: true });
+    io.emit('presence_sync', Object.fromEntries(globalPresence));
+  });
 
   socket.on('user_volume_update', (data) => {
     // Broadcast the new volume to everyone else in the channel
@@ -1100,8 +1117,18 @@ io.on('connection', (socket) => {
 
   // A private room the socket sits in for its whole session, used to deliver
   // DMs and friend-request notifications straight to a specific person.
-  socket.on('identify', (userId) => {
-    if (userId) socket.join(`user:${userId}`);
+  socket.on('identify', (data) => {
+    // Support both old string format and new object format { id, username }
+    const userId = typeof data === 'string' ? data : data.id;
+    const username = typeof data === 'string' ? 'User' : data.username;
+    
+    if (userId) {
+      socket.join(`user:${userId}`);
+      socket.userId = userId;
+      const p = globalPresence.get(userId) || {};
+      globalPresence.set(userId, { ...p, username, online: true });
+      io.emit('presence_sync', Object.fromEntries(globalPresence));
+    }
   });
 
   socket.on('send_message', async (data) => {
