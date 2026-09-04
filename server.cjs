@@ -1263,9 +1263,18 @@ io.on('connection', (socket) => {
     io.to(data.channelId).emit('now_playing_update', data);
   });
 
-  socket.on('dm_typing', (data) => {
-    // data: { toUserId, fromUsername }
-    io.to(`user:${data.toUserId}`).emit('dm_typing', data);
+  // --- DM CALL SIGNALING ---
+  socket.on('ring_friend', (data) => {
+    io.to(`user:${data.recipientId}`).emit('incoming_call', data);
+  });
+  socket.on('accept_call', (data) => {
+    io.to(`user:${data.callerId}`).emit('call_accepted', data);
+  });
+  socket.on('reject_call', (data) => {
+    io.to(`user:${data.callerId}`).emit('call_rejected', data);
+  });
+  socket.on('cancel_call', (data) => {
+    io.to(`user:${data.recipientId}`).emit('call_canceled', data);
   });
 
   // Real round-trip latency: client stamps the time, we echo it straight back.
