@@ -1275,7 +1275,12 @@ io.on('connection', (socket) => {
   socket.on('reject_call', (data) => {
     io.to(`user:${data.callerId}`).emit('call_rejected', data);
   });
+  socket.on('end_dm_call', (data) => {
+    // Notify the other participant that the call was ended
+    io.to(`user:${data.recipientId}`).emit('dm_call_ended', data);
+  });
   socket.on('cancel_call', (data) => {
+    // Caller hung up before the recipient answered — dismiss their incoming-call screen
     io.to(`user:${data.recipientId}`).emit('call_canceled', data);
   });
 
