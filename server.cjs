@@ -1131,9 +1131,28 @@ io.on('connection', (socket) => {
     socket.broadcast.to(data.channelId).emit('user_volume_update', data);
   });
 
-  socket.on('telestrator_draw', (data) => {
-    // Broadcast drawing coordinates to everyone else in the room
-    socket.broadcast.to(data.channelId).emit('telestrator_draw', data);
+  socket.on('whiteboard_status', (data) => {
+    socket.broadcast.to(data.channelId).emit('whiteboard_status', data);
+  });
+
+  socket.on('whiteboard_status_change', (data) => {
+    socket.broadcast.to(data.channelId).emit('whiteboard_status_change', data);
+  });
+
+  socket.on('telestrator_clear', (data) => {
+    socket.broadcast.to(data.channelId).emit('telestrator_clear', data);
+  });
+
+  socket.on('whiteboard_cursor', (data) => {
+    socket.broadcast.to(data.channelId).emit('whiteboard_cursor', data);
+  });
+
+  socket.on('whiteboard_request_sync', (data) => {
+    socket.broadcast.to(data.channelId).emit('whiteboard_request_sync', data);
+  });
+
+  socket.on('whiteboard_sync_response', (data) => {
+    socket.broadcast.to(data.channelId).emit('whiteboard_sync_response', data);
   });
 
   socket.on('media_action', (data) => {
