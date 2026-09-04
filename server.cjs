@@ -1262,7 +1262,9 @@ io.on('connection', (socket) => {
     // data: { channelId, title, artist, artworkUrl, isPlaying } or { channelId, title: null } to clear
     io.to(data.channelId).emit('now_playing_update', data);
   });
-
+  socket.on('dm_typing', (data) => {
+    io.to(`user:${data.toUserId}`).emit('dm_typing', data);
+  });
   // --- DM CALL SIGNALING ---
   socket.on('ring_friend', (data) => {
     io.to(`user:${data.recipientId}`).emit('incoming_call', data);
