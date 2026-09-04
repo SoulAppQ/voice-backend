@@ -1119,7 +1119,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('set_presence', (data) => {
+ socket.on('set_presence', (data) => {
     if (!socket.userId) return;
     const p = globalPresence.get(socket.userId) || {};
     globalPresence.set(socket.userId, { ...p, ...data, online: true });
@@ -1129,6 +1129,16 @@ io.on('connection', (socket) => {
   socket.on('user_volume_update', (data) => {
     // Broadcast the new volume to everyone else in the channel
     socket.broadcast.to(data.channelId).emit('user_volume_update', data);
+  });
+
+  // Relays all drawing strokes to friends in the room
+  socket.on('telestrator_draw', (data) => {
+    socket.broadcast.to(data.channelId).emit('telestrator_draw', data);
+  });
+
+  // Relays double-click lawn pings in Spatial Room
+  socket.on('spatial_ping', (data) => {
+    socket.broadcast.to(data.channelId).emit('spatial_ping', data);
   });
 
   socket.on('whiteboard_status', (data) => {
@@ -1154,7 +1164,6 @@ io.on('connection', (socket) => {
   socket.on('whiteboard_sync_response', (data) => {
     socket.broadcast.to(data.channelId).emit('whiteboard_sync_response', data);
   });
-
   socket.on('media_action', (data) => {
   // data: { channelId, type: 'play'|'pause'|'seek'|'enqueue', url, time }
   // Broadcast to everyone in the room EXCEPT the sender
