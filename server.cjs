@@ -1040,6 +1040,22 @@ app.put('/named-presets/:name', authMiddleware, async (req, res) => {
 // --- LIVEKIT TOKEN GENERATOR ---
 // Identity now comes from the verified JWT (not a client-supplied query param),
 // and the caller must actually belong to the channel's server.
+// --- NEW: DM CALL TOKEN ---
+app.get('/getDmToken', authMiddleware, async (req, res) => {
+  const { friendshipId } = req.query;
+  if (!friendshipId) return res.status(400).json({ error: 'friendshipId is required.' });
+
+  const friendship = await prisma.friendship.findFirst({
+    where: { id: friendshipId, OR: [{ userAId: req.user.id }, { userBId: req.user.id }] }
+  });
+  if (!friendship) return res.status(403).json({ error: 'Not friends.' });
+
+  const at = new AccessToken(process.env.LIVEKIT_API_KEY, process.env.LIVEKIT_API_SECRET, { identity: req.user.username });
+  at.addGrant({ roomJoin: true, room: `dm_${friendshipId}`, canPublish: true, canSubscribe: true });
+  res.send({ token: await at.toJwt() });
+});
+
+// --- LIVEKIT TOKEN GENERATOR ---
 app.get('/getToken', authMiddleware, async (req, res) => {
   const channelId = req.query.channelId;
   if (!channelId) return res.status(400).json({ error: 'channelId is required.' });
