@@ -353,7 +353,7 @@ app.patch('/me/profile', authMiddleware, async (req, res) => {
 app.patch('/me/username', authMiddleware, async (req, res) => {
   const nextUsername = (req.body.username || '').trim();
   if (!nextUsername) return res.status(400).json({ error: 'Username required.' });
-  if (nextUsername.length > 32) return res.status(400).json({ error: 'Username must be 32 characters or fewer.' });
+  if (nextUsername.length > 32) return res.status(400).json({ error: 'Keep it under 32 characters.' });
 
   if (nextUsername === req.user.username) {
     // No-op rename (e.g. only whitespace trimmed away) — nothing to change,
@@ -370,10 +370,10 @@ app.patch('/me/username', authMiddleware, async (req, res) => {
     res.json({ username: updated.username, authToken });
   } catch (err) {
     if (err.code === 'P2002') {
-      return res.status(409).json({ error: 'That username is already taken.' });
+      return res.status(409).json({ error: 'That username is taken.' });
     }
     console.error('PATCH /me/username failed:', err);
-    res.status(500).json({ error: 'Could not update your username.' });
+    res.status(500).json({ error: "Couldn't update your username." });
   }
 });
 
