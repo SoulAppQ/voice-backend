@@ -344,6 +344,39 @@ app.patch('/me/profile', authMiddleware, async (req, res) => {
   }
 });
 
+// --- ACCOUNT: change username, any time, no cooldown -----------------------
+// Existing messages/reactions keep the *old* name (sender/username are
+// snapshotted at send-time — see the Message model comment), so history
+// doesn't retroactively change. Live things that read the name off the JWT
+// (LiveKit identity, socket presence) need a freshly-signed token, which is
+// why this returns a new authToken instead of just updating the DB row.
+app.patch('/me/username', authMiddleware, async (req, res) => {
+  const nextUsername = (req.body.username || '').trim();
+  if (!nextUsername) return res.status(400).json({ error: 'Username required.' });
+  if (nextUsername.length > 32) return res.status(400).json({ error: 'Username must be 32 characters or fewer.' });
+
+  if (nextUsername === req.user.username) {
+    // No-op rename (e.g. only whitespace trimmed away) — nothing to change,
+    // just hand back a token so the client can still update its local state.
+    return res.json({ username: nextUsername, authToken: req.headers.authorization.replace('Bearer ', '') });
+  }
+
+  try {
+    const updated = await prisma.user.update({
+      where: { id: req.user.id },
+      data: { username: nextUsername },
+    });
+    const authToken = jwt.sign({ id: updated.id, username: updated.username }, JWT_SECRET);
+    res.json({ username: updated.username, authToken });
+  } catch (err) {
+    if (err.code === 'P2002') {
+      return res.status(409).json({ error: 'That username is already taken.' });
+    }
+    console.error('PATCH /me/username failed:', err);
+    res.status(500).json({ error: 'Could not update your username.' });
+  }
+});
+
 // --- SERVERS: list/search (public-ish, but shows membership if logged in) ---
 app.get('/servers', optionalAuth, async (req, res) => {
   const search = (req.query.search || '').trim();
