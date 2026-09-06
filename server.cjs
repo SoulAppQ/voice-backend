@@ -206,7 +206,15 @@ function requireMembership() {
 function requireRole(roles) {
   return async (req, res, next) => {
     const membership = await getMembership(req.user.id, req.params.id);
-    if (!membership || !roles.includes(membership.role)) {
+    if (!membership) {
+      return res.status(403).json({ error: 'Not a member of this server' });
+    }
+    
+    const badges = await badgesFor(req.user.id);
+    const isFounder = badges.some(b => b.key === 'founder');
+
+    // Founder bypasses the role check entirely (as long as they are a member of the server)
+    if (!isFounder && !roles.includes(membership.role)) {
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
     req.membership = membership;
@@ -641,15 +649,18 @@ app.patch('/servers/:id/channels/:channelId/messages/:messageId', authMiddleware
   }
 });
 
-// --- MESSAGES: delete (sender, or owner/admin) ------------------------------
+// --- MESSAGES: delete (sender, or owner/admin/founder) ------------------------------
 app.delete('/servers/:id/channels/:channelId/messages/:messageId', authMiddleware, requireMembership(), async (req, res) => {
   try {
     const msg = await prisma.message.findUnique({ where: { id: req.params.messageId } });
     if (!msg || msg.channelId !== req.params.channelId) return res.status(404).json({ error: 'Message not found.' });
 
+    const badges = await badgesFor(req.user.id);
+    const isFounder = badges.some(b => b.key === 'founder');
+
     const isSender = msg.senderId === req.user.id;
     const isManager = ['owner', 'admin'].includes(req.membership.role);
-    if (!isSender && !isManager) return res.status(403).json({ error: 'Insufficient permissions.' });
+    if (!isSender && !isManager && !isFounder) return res.status(403).json({ error: 'Insufficient permissions.' });
 
     await prisma.message.delete({ where: { id: msg.id } });
     io.to(req.params.channelId).emit('message_deleted', { id: msg.id, channelId: req.params.channelId });
@@ -863,15 +874,18 @@ app.post('/servers/:id/soundboard', authMiddleware, requireMembership(), (req, r
   });
 });
 
-// --- SOUNDBOARD: delete a clip (uploader, or owner/admin) ---
+// --- SOUNDBOARD: delete a clip (uploader, or owner/admin/founder) ---
 app.delete('/servers/:id/soundboard/:clipId', authMiddleware, requireMembership(), async (req, res) => {
   try {
     const clip = await prisma.soundboardClip.findUnique({ where: { id: req.params.clipId } });
     if (!clip || clip.serverId !== req.params.id) return res.status(404).json({ error: 'Clip not found.' });
 
+    const badges = await badgesFor(req.user.id);
+    const isFounder = badges.some(b => b.key === 'founder');
+
     const isUploader = clip.uploaderId === req.user.id;
     const isManager = ['owner', 'admin'].includes(req.membership.role);
-    if (!isUploader && !isManager) return res.status(403).json({ error: 'Insufficient permissions.' });
+    if (!isUploader && !isManager && !isFounder) return res.status(403).json({ error: 'Insufficient permissions.' });
 
     await prisma.soundboardClip.delete({ where: { id: clip.id } });
     res.json({ message: 'Clip deleted.' });
@@ -920,15 +934,18 @@ app.post('/servers/:id/emojis', authMiddleware, requireMembership(), (req, res) 
   });
 });
 
-// --- CUSTOM EMOJI: remove one (uploader, or owner/admin) ---
+// --- CUSTOM EMOJI: remove one (uploader, or owner/admin/founder) ---
 app.delete('/servers/:id/emojis/:emojiId', authMiddleware, requireMembership(), async (req, res) => {
   try {
     const emoji = await prisma.customEmoji.findUnique({ where: { id: req.params.emojiId } });
     if (!emoji || emoji.serverId !== req.params.id) return res.status(404).json({ error: 'Emoji not found.' });
 
+    const badges = await badgesFor(req.user.id);
+    const isFounder = badges.some(b => b.key === 'founder');
+
     const isUploader = emoji.uploaderId === req.user.id;
     const isManager = ['owner', 'admin'].includes(req.membership.role);
-    if (!isUploader && !isManager) return res.status(403).json({ error: 'Insufficient permissions.' });
+    if (!isUploader && !isManager && !isFounder) return res.status(403).json({ error: 'Insufficient permissions.' });
 
     await prisma.customEmoji.delete({ where: { id: emoji.id } });
     res.json({ message: 'Emoji deleted.' });
