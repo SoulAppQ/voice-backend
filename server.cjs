@@ -252,22 +252,6 @@ function serializeMessage(m) {
   };
 }
 
-// --- AUTO-GENERATE 'CO CO' SERVER ---
-async function initDefaultServer() {
-  const existing = await prisma.server.findFirst({ where: { name: 'CO CO' } });
-  if (!existing) {
-    await prisma.server.create({
-      data: {
-        name: 'CO CO',
-        ownerId: 'system',
-        channels: { create: [{ name: 'General Lounge' }] }
-      }
-    });
-    console.log('✅ Default CO CO server initialized!');
-  }
-}
-initDefaultServer();
-
 // --- SECURE REGISTRATION ---
 app.post('/register', authLimiter, async (req, res) => {
   const { username, password } = req.body;
