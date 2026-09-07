@@ -89,6 +89,12 @@ function uploadBufferToCloudinary(buffer, { folder, resourceType = 'image', publ
 const ALLOWED_MIME = new Set([
   'image/png', 'image/jpeg', 'image/gif', 'image/webp',
   'video/mp4', 'video/webm', 'video/quicktime',
+  // Add game dev file types:
+  'application/zip', 
+  'application/x-zip-compressed', 
+  'application/octet-stream', // Catch-all for .blend, .fbx, .unitypackage
+  'text/plain', 
+  'text/x-csharp' // For C# scripts
 ]);
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50MB, plenty for a short clip
 
@@ -554,29 +560,28 @@ app.delete('/servers/:id/members/:userId', authMiddleware, requireRole(['owner',
 
 // --- CHAT ATTACHMENTS: upload a screenshot/clip, get back a URL to share ---
 // Membership is checked so only people in the server can drop files for it.
-app.post(
-  '/servers/:id/upload',
-  authMiddleware,
-  requireMembership(),
-  uploadLimiter,
-  (req, res) => {
-    upload.single('file')(req, res, async (err) => {
-      if (err) return res.status(400).json({ error: err.message || 'Upload failed.' });
-      if (!req.file) return res.status(400).json({ error: 'No file provided.' });
-      const kind = req.file.mimetype.startsWith('video/') ? 'video' : 'image';
-      try {
-        const result = await uploadBufferToCloudinary(req.file.buffer, {
-          folder: 'soul/attachments',
-          resourceType: kind, // 'video' or 'image'
-        });
-        res.json({ url: result.secure_url, mimeType: req.file.mimetype, kind });
-      } catch (error) {
-        console.error('Attachment upload to Cloudinary failed:', error);
-        res.status(500).json({ error: 'Upload failed. Please try again.' });
-      }
-    });
-  }
-);
+app.post('/servers/:id/upload', authMiddleware, requireMembership(), uploadLimiter, (req, res) => {
+  upload.single('file')(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message || 'Upload failed.' });
+    if (!req.file) return res.status(400).json({ error: 'No file provided.' });
+    
+    // Determine Cloudinary resource type
+    let kind = 'raw'; // Default for project assets (.zip, .blend, .fbx)
+    if (req.file.mimetype.startsWith('video/')) kind = 'video';
+    if (req.file.mimetype.startsWith('image/')) kind = 'image';
+
+    try {
+      const result = await uploadBufferToCloudinary(req.file.buffer, {
+        folder: 'soul/attachments',
+        resourceType: kind, // Pass 'raw', 'video', or 'image'
+      });
+      res.json({ url: result.secure_url, mimeType: req.file.mimetype, kind });
+    } catch (error) {
+      console.error('Attachment upload to Cloudinary failed:', error);
+      res.status(500).json({ error: 'Upload failed. Please try again.' });
+    }
+  });
+});
 
 // --- MESSAGES: channel history (paginated) + pinning ------------------------
 // Defaults to the latest 50 messages. Pass ?before=<ISO timestamp> (the
