@@ -384,6 +384,9 @@ app.patch('/me/username', authMiddleware, async (req, res) => {
 });
 
 // --- SERVERS: list/search (public-ish, but shows membership if logged in) ---
+// Private servers are excluded entirely unless the requester is already a
+// member — they don't appear in search, browse, or unauthenticated results.
+// The only way to discover one is a direct invite code (see /invites/:code).
 app.get('/servers', optionalAuth, async (req, res) => {
   const search = (req.query.search || '').trim();
   const servers = await prisma.server.findMany({
@@ -392,9 +395,15 @@ app.get('/servers', optionalAuth, async (req, res) => {
     orderBy: { createdAt: 'asc' },
   });
 
-  res.json(servers.map((s) => ({
+  const visible = servers.filter((s) => {
+    if (!s.isPrivate) return true;
+    return req.user ? s.members.some((m) => m.userId === req.user.id) : false;
+  });
+
+  res.json(visible.map((s) => ({
     id: s.id,
     name: s.name,
+    isPrivate: s.isPrivate,
     memberCount: s.members.length,
     channelCount: s.channels.length,
     isMember: req.user ? s.members.some((m) => m.userId === req.user.id) : false,
@@ -406,11 +415,13 @@ app.get('/servers', optionalAuth, async (req, res) => {
 app.post('/servers', authMiddleware, async (req, res) => {
   const name = (req.body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Server name required.' });
+  const isPrivate = !!req.body.isPrivate;
 
   const newServer = await prisma.server.create({
     data: {
       name,
       ownerId: req.user.id,
+      isPrivate,
       channels: { create: [{ name: 'General Lounge' }] },
       members: { create: [{ userId: req.user.id, role: 'owner' }] },
     },
@@ -420,6 +431,9 @@ app.post('/servers', authMiddleware, async (req, res) => {
 });
 
 // --- SERVERS: join / leave ---
+// Public servers can still be joined directly by ID. Private servers can
+// only be joined via a valid invite code (POST /invites/:code/join) —
+// knowing the server's ID alone is never enough.
 app.post('/servers/:id/join', authMiddleware, async (req, res) => {
   const serverId = req.params.id;
   try {
@@ -428,6 +442,9 @@ app.post('/servers/:id/join', authMiddleware, async (req, res) => {
 
     const serverExists = await prisma.server.findUnique({ where: { id: serverId } });
     if (!serverExists) return res.status(404).json({ error: 'Server not found.' });
+    if (serverExists.isPrivate) {
+      return res.status(403).json({ error: 'This server is private. You need an invite to join.' });
+    }
 
     const member = await prisma.serverMember.create({
       data: { userId: req.user.id, serverId, role: 'member' },

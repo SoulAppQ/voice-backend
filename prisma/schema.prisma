@@ -40,6 +40,10 @@ model Server {
   id              String           @id @default(uuid())
   name            String
   ownerId         String
+  // Private servers never show up in GET /servers for non-members, and
+  // can't be joined by ID — the only way in is an invite code from
+  // someone who's already a member. See the join route below.
+  isPrivate       Boolean          @default(false)
   createdAt       DateTime         @default(now())
   channels        Channel[]
   members         ServerMember[]
