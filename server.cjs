@@ -404,6 +404,8 @@ app.get('/servers', optionalAuth, async (req, res) => {
     id: s.id,
     name: s.name,
     isPrivate: s.isPrivate,
+    avatarUrl: s.avatarUrl, // 👈 ADD THIS
+    bannerUrl: s.bannerUrl, // 👈 ADD THIS
     memberCount: s.members.length,
     channelCount: s.channels.length,
     isMember: req.user ? s.members.some((m) => m.userId === req.user.id) : false,
@@ -669,6 +671,43 @@ app.delete('/servers/:id/channels/:channelId/messages/:messageId/pin', authMiddl
     res.json({ id: msg.id });
   } catch (err) {
     res.status(404).json({ error: 'Message not found.' });
+  }
+});
+
+// --- SERVERS: update name, avatar, or banner (owner/admin/founder only) ---
+app.patch('/servers/:id', authMiddleware, requireRole(['owner', 'admin']), async (req, res) => {
+  const { name, avatarUrl, bannerUrl } = req.body;
+  try {
+    const updated = await prisma.server.update({
+      where: { id: req.params.id },
+      data: {
+        ...(name !== undefined ? { name: name.trim() } : {}),
+        ...(avatarUrl !== undefined ? { avatarUrl } : {}),
+        ...(bannerUrl !== undefined ? { bannerUrl } : {})
+      }
+    });
+    res.json(updated);
+  } catch (error) {
+    console.error('PATCH /servers failed:', error);
+    res.status(500).json({ error: 'Could not update server settings.' });
+  }
+});
+
+// --- CHANNELS: rename (owner/admin/founder only) ---
+app.patch('/servers/:id/channels/:channelId', authMiddleware, requireRole(['owner', 'admin']), async (req, res) => {
+  const name = (req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Channel name required.' });
+  try {
+    const updated = await prisma.channel.update({
+      where: { id: req.params.channelId },
+      data: { name }
+    });
+    // Let everyone in the room know the channel name changed
+    io.to(req.params.channelId).emit('channel_updated', updated);
+    res.json(updated);
+  } catch (error) {
+    console.error('PATCH /channels failed:', error);
+    res.status(500).json({ error: 'Could not rename channel.' });
   }
 });
 
