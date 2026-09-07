@@ -411,18 +411,26 @@ app.get('/servers', optionalAuth, async (req, res) => {
   })));
 });
 
-// --- SERVERS: create (creator becomes owner + gets a default channel) ---
+// --- SERVERS: create (creator becomes owner + gets starter channel(s)) ---
 app.post('/servers', authMiddleware, async (req, res) => {
   const name = (req.body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Server name required.' });
   const isPrivate = !!req.body.isPrivate;
+
+  // channelMode: 'text' -> a single text-only room (chat + file uploads,
+  // no voice). Anything else (default 'voice_text') -> the classic voice
+  // room plus a text room, matching the app's original starter layout.
+  const channelMode = req.body.channelMode === 'text' ? 'text' : 'voice_text';
+  const starterChannels = channelMode === 'text'
+    ? [{ name: 'General', type: 'text' }]
+    : [{ name: 'General Lounge' }, { name: 'Text Chat', type: 'text' }];
 
   const newServer = await prisma.server.create({
     data: {
       name,
       ownerId: req.user.id,
       isPrivate,
-      channels: { create: [{ name: 'General Lounge' }] },
+      channels: { create: starterChannels },
       members: { create: [{ userId: req.user.id, role: 'owner' }] },
     },
     include: { channels: true, members: true },
