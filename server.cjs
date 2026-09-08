@@ -1210,6 +1210,19 @@ setInterval(() => {
 }, 60 * 1000);
 
 const globalPresence = new Map();
+const PRESENCE_TTL_MS = 45000; // mark offline if no heartbeat in 45s
+
+setInterval(() => {
+  const now = Date.now();
+  let changed = false;
+  for (const [userId, p] of globalPresence) {
+    if (p.online && p.lastSeen && now - p.lastSeen > PRESENCE_TTL_MS) {
+      globalPresence.set(userId, { ...p, online: false });
+      changed = true;
+    }
+  }
+  if (changed) io.emit('presence_sync', Object.fromEntries(globalPresence));
+}, 15000);
 
 // --- CHAT: scoped per channel, not global ---
 io.on('connection', (socket) => {
@@ -1223,11 +1236,11 @@ io.on('connection', (socket) => {
   });
 
  socket.on('set_presence', (data) => {
-    if (!socket.userId) return;
-    const p = globalPresence.get(socket.userId) || {};
-    globalPresence.set(socket.userId, { ...p, ...data, online: true });
-    io.emit('presence_sync', Object.fromEntries(globalPresence));
-  });
+  if (!socket.userId) return;
+  const p = globalPresence.get(socket.userId) || {};
+  globalPresence.set(socket.userId, { ...p, ...data, online: true, lastSeen: Date.now() });
+  io.emit('presence_sync', Object.fromEntries(globalPresence));
+});
 
   socket.on('user_volume_update', (data) => {
     // Broadcast the new volume to everyone else in the channel
@@ -1302,12 +1315,12 @@ io.on('connection', (socket) => {
     const username = typeof data === 'string' ? 'User' : data.username;
     
     if (userId) {
-      socket.join(`user:${userId}`);
-      socket.userId = userId;
-      const p = globalPresence.get(userId) || {};
-      globalPresence.set(userId, { ...p, username, online: true });
-      io.emit('presence_sync', Object.fromEntries(globalPresence));
-    }
+  socket.join(`user:${userId}`);
+  socket.userId = userId;
+  const p = globalPresence.get(userId) || {};
+  globalPresence.set(userId, { ...p, username, online: true, lastSeen: Date.now() });
+  io.emit('presence_sync', Object.fromEntries(globalPresence));
+}
   });
 
   socket.on('send_message', async (data) => {
