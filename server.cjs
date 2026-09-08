@@ -1277,9 +1277,7 @@ io.on('connection', (socket) => {
     socket.broadcast.to(data.channelId).emit('room_command', data);
   });
 
-  socket.on('spatial_move', (data) => {
-    socket.broadcast.to(data.channelId).emit('spatial_move', data);
-  });
+
 
   socket.on('room_atmosphere_update', (data) => {
     // data: { channelId, roomReverb }
