@@ -1224,6 +1224,18 @@ setInterval(() => {
   if (changed) io.emit('presence_sync', Object.fromEntries(globalPresence));
 }, 15000);
 
+// --- VIRTUAL STAGE: server owns the truth for "who's speaking" per channel,
+// so every client (not just the requester) sees the same speaker/queue,
+// and reconnecting or freshly-opening the panel gets caught up correctly. ---
+const stageState = new Map(); // channelId -> { speakerId: string|null, requests: Set<string> }
+
+function getStage(channelId) {
+  if (!stageState.has(channelId)) {
+    stageState.set(channelId, { speakerId: null, requests: new Set() });
+  }
+  return stageState.get(channelId);
+}
+
 // --- CHAT: scoped per channel, not global ---
 io.on('connection', (socket) => {
 
@@ -1233,6 +1245,90 @@ io.on('connection', (socket) => {
       globalPresence.set(socket.userId, { ...p, online: false });
       io.emit('presence_sync', Object.fromEntries(globalPresence));
     }
+
+    // If the person who disconnected was on stage or waiting in the queue,
+    // clean that up so they don't leave a ghost speaker/request behind.
+    const { stageChannelId, stageUsername } = socket.data || {};
+    if (stageChannelId && stageUsername) {
+      const stage = stageState.get(stageChannelId);
+      if (stage) {
+        stage.requests.delete(stageUsername);
+        if (stage.speakerId === stageUsername) {
+          stage.speakerId = null;
+          io.to(stageChannelId).emit('stage_speaker_changed', { channelId: stageChannelId, speakerId: null });
+        }
+      }
+    }
+  });
+
+  socket.on('stage_state_request', (data) => {
+    const { channelId } = data || {};
+    if (!channelId) return;
+    const stage = getStage(channelId);
+    socket.emit('stage_state_sync', {
+      channelId,
+      speakerId: stage.speakerId,
+      requests: Array.from(stage.requests),
+    });
+  });
+
+  socket.on('stage_request', (data) => {
+    const { channelId, username } = data || {};
+    if (!channelId || !username) return;
+    socket.data.stageChannelId = channelId;
+    socket.data.stageUsername = username;
+    const stage = getStage(channelId);
+    stage.requests.add(username);
+    io.to(channelId).emit('stage_request', data);
+  });
+
+  socket.on('stage_request_cancel', (data) => {
+    const { channelId, username } = data || {};
+    if (!channelId || !username) return;
+    const stage = getStage(channelId);
+    stage.requests.delete(username);
+    io.to(channelId).emit('stage_request_cancel', data);
+  });
+
+  // The current speaker approving/denying someone from the request queue.
+  socket.on('stage_request_response', (data) => {
+    const { channelId, username, approved } = data || {};
+    if (!channelId || !username) return;
+    const stage = getStage(channelId);
+    stage.requests.delete(username);
+    if (approved) {
+      stage.speakerId = username;
+      io.to(channelId).emit('stage_speaker_changed', { channelId, speakerId: username });
+    }
+    io.to(channelId).emit('stage_request_response', data);
+  });
+
+  // Direct speaker changes that don't go through the request queue: taking
+  // an empty stage, or the current speaker stepping down. `by` is who's
+  // performing the action, so we can reject anyone else trying to clear
+  // or hijack the mic.
+  socket.on('stage_speaker_change', (data) => {
+    const { channelId, speakerId, by } = data || {};
+    if (!channelId || !by) return;
+    const stage = getStage(channelId);
+    socket.data.stageChannelId = channelId;
+    socket.data.stageUsername = by;
+
+    if (speakerId) {
+      if (stage.speakerId) return; // stage's already taken — use the request flow
+      stage.speakerId = speakerId;
+      stage.requests.delete(speakerId);
+    } else {
+      if (stage.speakerId !== by) return; // only the current speaker can step down
+      stage.speakerId = null;
+    }
+
+    io.to(channelId).emit('stage_speaker_changed', { channelId, speakerId: stage.speakerId });
+  });
+
+  socket.on('stage_applause', (data) => {
+    if (!data || !data.channelId) return;
+    socket.broadcast.to(data.channelId).emit('stage_applause', data);
   });
 
  socket.on('set_presence', (data) => {
@@ -1255,6 +1351,11 @@ io.on('connection', (socket) => {
   // Relays double-click lawn pings in Spatial Room
   socket.on('spatial_ping', (data) => {
     socket.broadcast.to(data.channelId).emit('spatial_ping', data);
+  });
+
+  // Relays spatial position updates when users move their avatars
+  socket.on('spatial_position_update', (data) => {
+    socket.broadcast.to(data.channelId).emit('spatial_position_update', data);
   });
 
   socket.on('whiteboard_status', (data) => {
